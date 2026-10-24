@@ -1,192 +1,269 @@
-import { useEffect, useState } from 'react';
-import { supabase } from '@/lib/supabase';
-import { Users, IndianRupee, Ticket, TrendingUp, Calendar, MapPin } from 'lucide-react';
-import { motion } from 'framer-motion';
+import { useCallback, useEffect, useState } from 'react';
+import {
+  ArrowRight,
+  CalendarRange,
+  MapPinned,
+  RefreshCw,
+  ScanLine,
+  Ticket,
+  TrendingUp,
+  Users,
+} from 'lucide-react';
+import { adminOverview, type AdminOverview } from '@/lib/adminApi';
+import { formatRupees } from '@/lib/pricing';
+import {
+  Empty,
+  Notice,
+  PageHeader,
+  Panel,
+  PanelHead,
+  Spinner,
+  Stat,
+  StatusChip,
+  formatDateTime,
+} from '@/components/admin/ui';
 
-interface Stats {
-  totalBookings: number;
-  totalRevenue: number;
-  paidBookings: number;
-  checkedIn: number;
-}
+export default function AdminDashboard({ onGoTo }: { onGoTo: (tab: string) => void }) {
+  const [data, setData] = useState<AdminOverview | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
 
-interface EventStat {
-  event_id: string;
-  event_name: string;
-  count: number;
-}
-
-interface CityStat {
-  city: string;
-  state: string;
-  booked: number;
-  capacity: number;
-}
-
-interface RecentBooking {
-  booking_code: string;
-  name: string;
-  phone: string;
-  amount: number;
-  status: string;
-  created_at: string;
-}
-
-export default function AdminDashboard() {
-  const [stats, setStats] = useState<Stats>({ totalBookings: 0, totalRevenue: 0, paidBookings: 0, checkedIn: 0 });
-  const [eventStats, setEventStats] = useState<EventStat[]>([]);
-  const [cityStats, setCityStats] = useState<CityStat[]>([]);
-  const [recent, setRecent] = useState<RecentBooking[]>([]);
-
-  useEffect(() => {
-    async function load() {
-      const { data: bookings } = await supabase.from('bookings').select('*');
-      const all = bookings ?? [];
-      const paid = all.filter((b) => b.status === 'paid');
-      setStats({
-        totalBookings: all.length,
-        totalRevenue: paid.reduce((s, b) => s + b.amount, 0),
-        paidBookings: paid.length,
-        checkedIn: all.filter((b) => b.checked_in).length,
-      });
-
-      const { data: events } = await supabase.from('events').select('*');
-      if (events) {
-        setEventStats(
-          events.map((e) => ({
-            event_id: e.id,
-            event_name: e.name_en,
-            count: all.filter((b) => b.event_id === e.id).length,
-          }))
-        );
-      }
-
-      const { data: cities } = await supabase.from('cities').select('*').eq('event_id', 'evt-sundarkand');
-      if (cities) {
-        setCityStats(cities.map((c) => ({ city: c.city, state: c.state, booked: c.booked, capacity: c.capacity })));
-      }
-
-      const { data: recentData } = await supabase
-        .from('bookings')
-        .select('booking_code, name, phone, amount, status, created_at')
-        .order('created_at', { ascending: false })
-        .limit(10);
-      setRecent(recentData ?? []);
+  const load = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true);
+    try {
+      setData(await adminOverview());
+      setError('');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not load the dashboard.');
+    } finally {
+      setLoading(false);
     }
-    load();
   }, []);
 
-  const statCards = [
-    { label: 'Total bookings', value: stats.totalBookings, icon: <Ticket size={20} />, color: 'from-saffron/20 to-saffron/5' },
-    { label: 'Revenue (paid)', value: `₹${stats.totalRevenue.toLocaleString('en-IN')}`, icon: <IndianRupee size={20} />, color: 'from-green-500/20 to-green-500/5' },
-    { label: 'Paid bookings', value: stats.paidBookings, icon: <Users size={20} />, color: 'from-gold/20 to-gold/5' },
-    { label: 'Checked in', value: stats.checkedIn, icon: <TrendingUp size={20} />, color: 'from-blue-500/20 to-blue-500/5' },
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const paidSeats = data?.totals.seats ?? 0;
+  const pending = data?.totals.pending ?? 0;
+  const checkins = data?.totals.checkins ?? 0;
+  const revenue = data?.totals.revenue ?? 0;
+
+  const actions = [
+    { label: 'Page content', hint: 'Hero, FAQ, Expo copy', icon: <Ticket size={16} />, tab: 'content' },
+    { label: 'States & venues', hint: 'Add a city or address', icon: <MapPinned size={16} />, tab: 'locations' },
+    { label: 'Schedules', hint: 'Dates and seat capacity', icon: <CalendarRange size={16} />, tab: 'schedules' },
+    { label: 'Gate scanner', hint: 'Verify a pass on entry', icon: <ScanLine size={16} />, tab: 'checkin' },
   ];
 
   return (
-    <div className="space-y-8">
-      <h1 className="font-devanagari text-2xl text-ivory">Dashboard</h1>
+    <div>
+      <PageHeader
+        eyebrow="Adhyatmik Bharat · Event control"
+        title="Dashboard"
+        subtitle="Live numbers from the booking database, across every city, venue and ticket type."
+        actions={
+          <button onClick={() => void load()} className="btn btn-ghost btn-sm" disabled={loading}>
+            <RefreshCw size={14} className={loading ? 'animate-spin' : ''} /> Refresh
+          </button>
+        }
+      />
 
-      {/* Stat cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        {statCards.map((s, i) => (
-          <motion.div
-            key={s.label}
-            className={`rounded-2xl p-5 border border-gold/15 bg-gradient-to-br ${s.color}`}
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: i * 0.1 }}
-          >
-            <div className="flex items-center justify-between mb-3">
-              <span className="text-ivory/50 text-sm font-mukta">{s.label}</span>
-              <span className="text-gold-light">{s.icon}</span>
-            </div>
-            <p className="font-devanagari text-2xl text-ivory">{s.value}</p>
-          </motion.div>
-        ))}
-      </div>
+      {error && (
+        <div className="mb-5">
+          <Notice>{error}</Notice>
+        </div>
+      )}
 
-      <div className="grid lg:grid-cols-2 gap-6">
-        {/* Bookings per event */}
-        <div className="glass rounded-2xl p-6 border border-gold/15">
-          <h3 className="text-ivory font-mukta font-semibold mb-4 flex items-center gap-2">
-            <Calendar size={18} className="text-saffron" /> Bookings per event
-          </h3>
-          <div className="space-y-3">
-            {eventStats.map((e) => (
-              <div key={e.event_id} className="flex items-center justify-between">
-                <span className="text-ivory/60 text-sm font-mukta">{e.event_name}</span>
-                <span className="text-gold-light font-mukta font-semibold text-sm">{e.count}</span>
-              </div>
+      {loading && !data ? (
+        <Panel>
+          <Spinner label="Loading live numbers" />
+        </Panel>
+      ) : data ? (
+        <div className="space-y-6">
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+            <Stat label="Paid revenue" value={formatRupees(revenue)} note="Captured payments only" tone="lotus" />
+            <Stat label="Seats confirmed" value={paidSeats.toLocaleString('en-IN')} note="Paid pass holders" tone="sky" />
+            <Stat label="Bookings" value={data.totals.bookings.toLocaleString('en-IN')} note={`${pending} pending payment`} />
+            <Stat label="Checked in" value={checkins.toLocaleString('en-IN')} note="Scanned at the gate" tone="amber" />
+            <Stat
+              label="Show rate"
+              value={paidSeats > 0 ? `${Math.round((checkins / paidSeats) * 100)}%` : '—'}
+              note="Checked in / paid seats"
+            />
+          </div>
+
+          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+            {actions.map((action) => (
+              <button
+                key={action.tab}
+                onClick={() => onGoTo(action.tab)}
+                className="group flex items-center gap-3 rounded-2xl border border-line bg-white px-4 py-3.5 text-left transition-all hover:-translate-y-0.5 hover:border-saffron/40 hover:shadow-[0_16px_34px_-26px_rgba(238,44,143,.5)]"
+              >
+                <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-sandal-2 text-saffron-ink transition-colors group-hover:bg-saffron group-hover:text-white">
+                  {action.icon}
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="block font-ui text-[0.86rem] font-semibold text-ink">{action.label}</span>
+                  <span className="block truncate text-[0.68rem] text-muted">{action.hint}</span>
+                </span>
+                <ArrowRight size={14} className="shrink-0 text-muted transition-transform group-hover:translate-x-0.5" />
+              </button>
             ))}
           </div>
-        </div>
 
-        {/* Seats per city */}
-        <div className="glass rounded-2xl p-6 border border-gold/15">
-          <h3 className="text-ivory font-mukta font-semibold mb-4 flex items-center gap-2">
-            <MapPin size={18} className="text-saffron" /> Seats per city
-          </h3>
-          <div className="space-y-2 max-h-[280px] overflow-y-auto">
-            {cityStats.map((c) => {
-              const pct = Math.round((c.booked / c.capacity) * 100);
-              return (
-                <div key={c.city} className="flex items-center gap-3">
-                  <span className="text-ivory/60 text-sm font-mukta w-24 truncate">{c.city}</span>
-                  <div className="flex-1 h-2 rounded-full bg-navy-800 overflow-hidden">
-                    <div
-                      className={`h-full rounded-full ${pct >= 100 ? 'bg-red-500' : pct >= 70 ? 'bg-saffron' : 'bg-gold'}`}
-                      style={{ width: `${Math.min(pct, 100)}%` }}
-                    />
-                  </div>
-                  <span className="text-ivory/40 text-xs font-mukta w-16 text-right">{c.booked}/{c.capacity}</span>
+          <div className="grid gap-5 xl:grid-cols-[1.05fr_.95fr]">
+            <Panel>
+              <PanelHead
+                title="Visitors by state"
+                subtitle="Paid seats and revenue, highest first"
+                actions={
+                  <button onClick={() => onGoTo('bookings')} className="font-ui text-[0.72rem] font-semibold text-saffron-ink hover:underline">
+                    Open reports
+                  </button>
+                }
+              />
+              {data.byState.length === 0 ? (
+                <Empty title="No bookings yet" hint="As soon as a pass is paid, state totals appear here." />
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="min-w-full text-left text-sm">
+                    <thead>
+                      <tr className="border-b border-line bg-sandal-2/60 font-ui text-[0.62rem] uppercase tracking-[0.12em] text-muted">
+                        <th className="px-5 py-2.5">State</th>
+                        <th className="px-3 py-2.5 text-right">Bookings</th>
+                        <th className="px-3 py-2.5 text-right">Seats</th>
+                        <th className="px-5 py-2.5 text-right">Revenue</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-line/70">
+                      {data.byState.map((state) => (
+                        <tr key={state.id} className="hover:bg-sandal-2/40">
+                          <td className="px-5 py-3">
+                            <span className="font-ui font-semibold text-ink">{state.name_en}</span>
+                            <span className="ml-1.5 font-hindi text-[0.7rem] text-muted">{state.name_hi}</span>
+                          </td>
+                          <td className="px-3 py-3 text-right text-muted">{state.bookings}</td>
+                          <td className="px-3 py-3 text-right font-semibold text-ink">{state.seats}</td>
+                          <td className="px-5 py-3 text-right font-display text-lg text-ink">{formatRupees(state.revenue)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
                 </div>
-              );
-            })}
+              )}
+            </Panel>
+
+            <Panel>
+              <PanelHead
+                title="Seats sold by ticket"
+                subtitle="Paid seats against configured city capacity"
+                actions={
+                  <button onClick={() => onGoTo('schedules')} className="font-ui text-[0.72rem] font-semibold text-saffron-ink hover:underline">
+                    Manage capacity
+                  </button>
+                }
+              />
+              <div className="space-y-4 p-5">
+                {data.byTicket.map((ticket) => {
+                  const percent = ticket.capacity > 0 ? Math.min(100, Math.round((ticket.sold / ticket.capacity) * 100)) : 0;
+                  return (
+                    <div key={ticket.id}>
+                      <div className="flex items-baseline justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="truncate font-ui text-[0.82rem] font-semibold text-ink">{ticket.name_en}</p>
+                          <p className="truncate text-[0.66rem] text-muted">
+                            {ticket.event_en} · {formatRupees(ticket.price)}
+                          </p>
+                        </div>
+                        <p className="shrink-0 text-right text-[0.7rem] text-muted">
+                          <span className="font-ui text-sm font-semibold text-ink">{ticket.sold.toLocaleString('en-IN')}</span>
+                          {' / '}
+                          {ticket.capacity.toLocaleString('en-IN')}
+                        </p>
+                      </div>
+                      <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-sandal-2">
+                        <div
+                          className="h-full rounded-full bg-gradient-to-r from-sky via-saffron to-saffron-dark"
+                          style={{ width: `${percent}%` }}
+                        />
+                      </div>
+                    </div>
+                  );
+                })}
+                {data.byTicket.length === 0 && <Empty title="No active tickets" />}
+              </div>
+            </Panel>
+          </div>
+
+          <div className="grid gap-5 xl:grid-cols-[.9fr_1.1fr]">
+            <Panel>
+              <PanelHead title="Events" subtitle="Bookings and revenue by event" />
+              <div className="divide-y divide-line/70">
+                {data.byEvent.map((event) => (
+                  <div key={event.id} className="flex items-center justify-between gap-3 px-5 py-3.5">
+                    <div className="flex items-center gap-3">
+                      <span className="grid h-9 w-9 place-items-center rounded-full bg-sandal-2 text-saffron-ink">
+                        <TrendingUp size={15} />
+                      </span>
+                      <div>
+                        <p className="font-ui text-[0.84rem] font-semibold text-ink">{event.name_en}</p>
+                        <p className="text-[0.66rem] uppercase tracking-[0.12em] text-muted">{event.kind}</p>
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <p className="font-ui text-sm font-semibold text-ink">{formatRupees(Number(event.revenue))}</p>
+                      <p className="text-[0.66rem] text-muted">
+                        {Number(event.seats)} seats · {Number(event.bookings)} bookings
+                      </p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </Panel>
+
+            <Panel>
+              <PanelHead
+                title="Latest bookings"
+                subtitle="Newest first"
+                actions={
+                  <button onClick={() => onGoTo('bookings')} className="font-ui text-[0.72rem] font-semibold text-saffron-ink hover:underline">
+                    All bookings
+                  </button>
+                }
+              />
+              {data.recent.length === 0 ? (
+                <Empty title="No bookings yet" hint="Share the event page to start receiving pass bookings." />
+              ) : (
+                <div className="divide-y divide-line/70">
+                  {data.recent.map((booking) => (
+                    <div key={booking.reference} className="flex items-center gap-3 px-5 py-3">
+                      <span className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-sandal-2 text-saffron-ink">
+                        <Users size={14} />
+                      </span>
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-sm text-ink">
+                          <span className="font-mono text-[0.74rem] tracking-wide text-saffron-ink">{booking.reference}</span>
+                          <span className="mx-1.5 text-muted/50">·</span>
+                          {booking.name}
+                        </p>
+                        <p className="truncate text-[0.68rem] text-muted">
+                          {booking.ticket_en} · {booking.qty} seat{booking.qty === 1 ? '' : 's'} ·{' '}
+                          {formatDateTime(booking.created_at)}
+                        </p>
+                      </div>
+                      <div className="shrink-0 text-right">
+                        <p className="font-ui text-sm font-semibold text-ink">{formatRupees(Number(booking.amount))}</p>
+                        <StatusChip status={booking.status} />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </Panel>
           </div>
         </div>
-      </div>
-
-      {/* Recent bookings */}
-      <div className="glass rounded-2xl p-6 border border-gold/15">
-        <h3 className="text-ivory font-mukta font-semibold mb-4">Last 10 bookings</h3>
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm font-mukta">
-            <thead>
-              <tr className="text-ivory/40 text-left border-b border-gold/10">
-                <th className="py-2 px-3">Code</th>
-                <th className="py-2 px-3">Name</th>
-                <th className="py-2 px-3">Phone</th>
-                <th className="py-2 px-3">Amount</th>
-                <th className="py-2 px-3">Status</th>
-                <th className="py-2 px-3">Date</th>
-              </tr>
-            </thead>
-            <tbody>
-              {recent.length === 0 ? (
-                <tr><td colSpan={6} className="py-6 text-center text-ivory/30">No bookings yet</td></tr>
-              ) : (
-                recent.map((b) => (
-                  <tr key={b.booking_code} className="border-b border-gold/5 hover:bg-white/5">
-                    <td className="py-2.5 px-3 text-gold-light">{b.booking_code}</td>
-                    <td className="py-2.5 px-3 text-ivory/70">{b.name}</td>
-                    <td className="py-2.5 px-3 text-ivory/50">{b.phone}</td>
-                    <td className="py-2.5 px-3 text-ivory/70">₹{b.amount.toLocaleString('en-IN')}</td>
-                    <td className="py-2.5 px-3">
-                      <span className={`px-2 py-0.5 rounded-full text-xs ${
-                        b.status === 'paid' ? 'bg-green-500/10 text-green-400' :
-                        b.status === 'pending' ? 'bg-saffron/10 text-saffron' :
-                        'bg-red-500/10 text-red-400'
-                      }`}>{b.status}</span>
-                    </td>
-                    <td className="py-2.5 px-3 text-ivory/40 text-xs">{new Date(b.created_at).toLocaleDateString()}</td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-        </div>
-      </div>
+      ) : null}
     </div>
   );
 }

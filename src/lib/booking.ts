@@ -75,7 +75,7 @@ export async function lookupBooking(phone?: string, bookingCode?: string): Promi
 
 declare global {
   interface Window {
-    Razorpay?: unknown;
+    Razorpay?: new (options: unknown) => { open: () => void };
   }
 }
 
@@ -141,7 +141,7 @@ export async function openRazorpayCheckout(
     },
   };
 
-  const rzp = new (window.Razorpay as typeof RazorpayConstructor)(options);
+  const rzp = new (window.Razorpay as RazorpayConstructor)(options);
   rzp.open();
 }
 

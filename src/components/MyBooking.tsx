@@ -1,12 +1,13 @@
 import { useState } from 'react';
 import { motion } from 'framer-motion';
-import { Search, Calendar, MapPin, Users, Download, CheckCircle, Clock, XCircle } from 'lucide-react';
+import { Search } from 'lucide-react';
 import { useApp } from '@/context/AppContext';
 import { ui, uiT } from '@/i18n';
 import { useToast } from '@/context/ToastContext';
 import { lookupBooking } from '@/lib/booking';
 import { generateTicketPDF } from '@/lib/ticketPdf';
 import ParticleField from '@/components/ParticleField';
+import TicketPass from '@/components/TicketPass';
 
 interface BookingRecord {
   booking: {
@@ -27,13 +28,6 @@ interface BookingRecord {
   city: string | null;
   state: string | null;
 }
-
-const statusConfig = {
-  paid: { icon: <CheckCircle size={16} />, color: 'text-green-600', bg: 'bg-green-500/10' },
-  pending: { icon: <Clock size={16} />, color: 'text-saffron-ink', bg: 'bg-saffron/10' },
-  refunded: { icon: <XCircle size={16} />, color: 'text-red-500', bg: 'bg-red-500/10' },
-  cancelled: { icon: <XCircle size={16} />, color: 'text-red-500', bg: 'bg-red-500/10' },
-};
 
 export default function MyBooking() {
   const { lang } = useApp();
@@ -82,20 +76,21 @@ export default function MyBooking() {
   };
 
   return (
-    <section id="my-booking" className="relative py-24 px-4 sm:px-6 bg-sandal">
+    <section id="my-booking" className="section section--cream">
       <ParticleField count={10} />
-      <div className="relative mx-auto max-w-2xl">
+      <div className="wrap section-inner mx-auto max-w-2xl">
         <motion.div
-          className="text-center mb-10"
+          className="section-head"
           initial={{ opacity: 0, y: 20 }}
           whileInView={{ opacity: 1, y: 0 }}
           viewport={{ once: true }}
           transition={{ duration: 0.8, ease: [0.22, 1, 0.36, 1] }}
         >
-          <h2 className="font-display text-3xl sm:text-4xl text-ink mb-3">
-            <span className="text-gradient-saffron">{uiT(ui.nav.myBooking, lang)}</span>
-          </h2>
-          <p className="text-muted font-body text-sm">
+          <span className="eyebrow eyebrow--center">
+            {lang === 'en' ? 'Your tickets' : 'आपके टिकट'}
+          </span>
+          <h2 className="font-display text-ink">{uiT(ui.nav.myBooking, lang)}</h2>
+          <p>
             {lang === 'en'
               ? 'Look up your booking with your phone number or booking ID.'
               : 'अपनी फ़ोन नंबर या बुकिंग आईडी से अपनी बुकिंग खोजें।'}
@@ -103,7 +98,7 @@ export default function MyBooking() {
         </motion.div>
 
         <motion.div
-          className="rounded-24 p-6 border border-line bg-white/60 backdrop-blur-sm mb-8 shadow-sm"
+          className="card mb-8 p-6"
           initial={{ opacity: 0, scale: 0.95 }}
           whileInView={{ opacity: 1, scale: 1 }}
           viewport={{ once: true }}
@@ -118,13 +113,13 @@ export default function MyBooking() {
                 onChange={(e) => setQuery(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
                 placeholder={lang === 'en' ? 'Phone or booking ID' : 'फ़ोन या बुकिंग आईडी'}
-                className="w-full pl-12 pr-4 py-3 rounded-14 bg-sandal-2 border border-line text-ink placeholder-muted font-body focus:border-saffron focus:outline-none transition-colors"
+                className="w-full rounded-14 border border-line bg-white py-3.5 pl-12 pr-4 text-ink placeholder-muted transition-colors focus:border-saffron focus:outline-none"
               />
             </div>
             <button
               onClick={handleSearch}
               disabled={searching}
-              className="px-6 py-3 rounded-full bg-grad-hand text-white font-ui font-semibold hover:scale-105 transition-transform disabled:opacity-50"
+              className="btn btn-primary shrink-0 disabled:opacity-50"
             >
               {searching ? '...' : (lang === 'en' ? 'Search' : 'खोजें')}
             </button>
@@ -133,57 +128,30 @@ export default function MyBooking() {
 
         {/* Results */}
         {searched && results.length > 0 && (
-          <div className="space-y-4">
+          <div className="space-y-5">
             {results.map((r, i) => {
-              const sc = statusConfig[r.booking.status as keyof typeof statusConfig] ?? statusConfig.pending;
+              const eventDate = r.city ? '2027-06-12' : '2027-08-27';
               return (
                 <motion.div
                   key={r.booking.booking_code}
-                  className="rounded-24 p-5 border border-line bg-white/60 backdrop-blur-sm shadow-sm"
                   initial={{ opacity: 0, y: 20 }}
                   animate={{ opacity: 1, y: 0 }}
-                  transition={{ delay: i * 0.1 }}
+                  transition={{ delay: i * 0.1, duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
                 >
-                  <div className="flex items-start justify-between mb-4">
-                    <div>
-                      <p className="text-saffron-ink font-ui font-semibold text-sm">{r.booking.booking_code}</p>
-                      <p className="text-muted text-xs font-body">{r.booking.name}</p>
-                    </div>
-                    <div className={`flex items-center gap-1.5 px-3 py-1 rounded-full ${sc.bg} ${sc.color} text-xs font-ui font-semibold`}>
-                      {sc.icon}
-                      {r.booking.status}
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-3 text-sm">
-                    <div className="flex items-center gap-2 text-muted font-body">
-                      <Calendar size={14} className="text-saffron" />
-                      {lang === 'en' ? r.event_name_en : r.event_name_hi}
-                    </div>
-                    <div className="flex items-center gap-2 text-muted font-body">
-                      <Users size={14} className="text-saffron" />
-                      {r.booking.persons} {lang === 'en' ? 'persons' : 'व्यक्ति'}
-                    </div>
-                    {r.city && (
-                      <div className="flex items-center gap-2 text-muted font-body">
-                        <MapPin size={14} className="text-saffron" />
-                        {r.city}, {r.state}
-                      </div>
-                    )}
-                    <div className="text-ink font-body font-semibold">
-                      ₹{r.booking.amount.toLocaleString('en-IN')}
-                    </div>
-                  </div>
-
-                  {r.booking.status === 'paid' && (
-                    <button
-                      onClick={() => handleDownload(r)}
-                      className="mt-4 flex items-center gap-2 text-sm text-saffron-ink hover:text-saffron font-body transition-colors"
-                    >
-                      <Download size={16} />
-                      {lang === 'en' ? 'Download ticket' : 'टिकट डाउनलोड करें'}
-                    </button>
-                  )}
+                  <TicketPass
+                    bookingCode={r.booking.booking_code}
+                    holderName={r.booking.name}
+                    event={lang === 'en' ? r.event_name_en : r.event_name_hi}
+                    ticket={lang === 'en' ? r.ticket_label_en : r.ticket_label_hi}
+                    city={r.city ? `${r.city}, ${r.state}` : undefined}
+                    persons={r.booking.persons}
+                    amount={r.booking.amount}
+                    date={eventDate}
+                    venue={r.city ?? 'Pragati Maidan, Delhi'}
+                    status={r.booking.status as 'paid' | 'pending' | 'refunded' | 'cancelled'}
+                    checkedIn={r.booking.checked_in}
+                    onDownload={r.booking.status === 'paid' ? () => handleDownload(r) : undefined}
+                  />
                 </motion.div>
               );
             })}

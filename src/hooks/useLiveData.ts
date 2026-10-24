@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import { supabase } from '@/lib/supabase';
+import { isSupabaseConfigured, supabase } from '@/lib/supabase';
+import { seedCities, seedEvents, seedTickets } from '@/data/seed';
 import type { CityItem, Coupon, EventItem, TicketType, TierCard } from '@/types';
 
 export function useLiveData() {
@@ -7,11 +8,19 @@ export function useLiveData() {
   const [tickets, setTickets] = useState<TicketType[]>([]);
   const [cities, setCities] = useState<CityItem[]>([]);
   const [tierCards, setTierCards] = useState<TierCard[]>([]);
-  const [coupons, setCoupons] = useState<Coupon[]>([]);
+  const [coupons] = useState<Coupon[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     let active = true;
+
+    if (!isSupabaseConfigured) {
+      setEvents(seedEvents);
+      setTickets(seedTickets);
+      setCities(seedCities);
+      setLoading(false);
+      return;
+    }
 
     async function load() {
       const [evRes, tkRes, ciRes, tcRes] = await Promise.all([

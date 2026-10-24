@@ -42,6 +42,10 @@ export default {
         },
         line: '#E5E1D3',
         mandala: '#D3CFBF',
+        muted: '#5F6B80',
+        success: '#2F7D32',
+        error: '#B42318',
+        'cream-on-dark': '#E8F1F8',
         // Keep old references for compatibility
         navy: {
           DEFAULT: '#0F2342',

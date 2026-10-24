@@ -1,0 +1,842 @@
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import type { Html5Qrcode } from 'html5-qrcode';
+import { AnimatePresence, motion } from 'framer-motion';
+import {
+  CalendarDays,
+  Camera,
+  CameraOff,
+  CheckCircle2,
+  Clock3,
+  Hash,
+  Loader2,
+  MapPin,
+  QrCode,
+  ScanLine,
+  Search,
+  ShieldAlert,
+  Ticket,
+  Users,
+  X,
+  XCircle,
+} from 'lucide-react';
+import { AdminApiError, type CheckInResult } from '@/lib/adminApi';
+import { formatRupees } from '@/lib/pricing';
+import { formatTimeRange } from '@/lib/eventFormat';
+import { formatDateTime, formatDay } from '@/components/admin/ui';
+
+type BlockedInfo = {
+  reference: string;
+  name: string;
+  guestCategory: string;
+  reason: string;
+  blockedBy: string | null;
+};
+
+type DenialCode = 'not_paid' | 'not_started' | 'expired' | 'entries_exhausted' | 'already_scanned' | 'unknown';
+
+type DenialInfo = {
+  reference: string;
+  name: string;
+  guestCategory: string;
+  code: DenialCode;
+  status?: string;
+  source?: string;
+  passDays?: number;
+  validFrom?: string;
+  validTo?: string;
+  expiredOn?: string;
+  entriesAllowed?: number;
+  entriesUsed?: number;
+  entriesLeft?: number;
+  lastEntryDate?: string;
+  lastEntryAt?: string;
+  ticketName?: string;
+  eventName?: string;
+  endTime?: string;
+};
+
+type Feedback =
+  | { kind: 'success'; result: CheckInResult }
+  | { kind: 'blocked'; blocked: BlockedInfo; message: string }
+  | { kind: 'denied'; denied: DenialInfo; message: string }
+  | { kind: 'error'; message: string; notFound?: boolean };
+
+const DEDUPE_MS = 4000;
+
+const DENIED_COPY: Record<DenialCode, { en: string; hi: string; note: string }> = {
+  already_scanned: {
+    en: 'Already scanned today',
+    hi: 'आज यह पास पहले स्कैन हो चुका है',
+    note: 'One pass gives one entry per day. This devotee is already inside — do not let them in again on the same pass.',
+  },
+  entries_exhausted: {
+    en: 'All entries used',
+    hi: 'सभी प्रवेश खत्म',
+    note: 'Every entry day on this pass is finished. Send the devotee to the help desk if they need another pass.',
+  },
+  expired: {
+    en: 'Pass expired',
+    hi: 'पास की समय-सीमा समाप्त',
+    note: 'The event days covered by this pass are over. Entry is closed.',
+  },
+  not_started: {
+    en: 'Entry not open yet',
+    hi: 'प्रवेश अभी शुरू नहीं हुआ',
+    note: 'This pass becomes valid on a later date. Do not allow entry before the event day.',
+  },
+  not_paid: {
+    en: 'Payment pending',
+    hi: 'भुगतान बाकी है',
+    note: 'This booking is not paid, or it was cancelled or refunded. Entry is not allowed.',
+  },
+  unknown: {
+    en: 'Not allowed',
+    hi: 'प्रवेश नहीं',
+    note: 'This pass cannot be accepted at the gate. Check the code or search the booking in the admin panel.',
+  },
+};
+
+/** Bilingual identity chip — the gate must know whose pass this is before letting them in. */
+const GUEST_BADGE: Record<string, { en: string; hi: string; tone: string }> = {
+  visitor: { en: 'Visitor', hi: 'दर्शक', tone: 'bg-emerald-600/25 text-emerald-50 border-emerald-200/40' },
+  vip: { en: 'VIP guest', hi: 'विपि अतिथि', tone: 'bg-amber-400/25 text-amber-50 border-amber-200/50' },
+  press: { en: 'Press', hi: 'प्रेस', tone: 'bg-sky/25 text-sky-50 border-sky-200/40' },
+  organiser: { en: 'Organiser', hi: 'आयोजक', tone: 'bg-white/20 text-white border-white/40' },
+  staff: { en: 'Gate staff', hi: 'स्टाफ़', tone: 'bg-white/20 text-white border-white/40' },
+  other: { en: 'Other guest', hi: 'अन्य अतिथि', tone: 'bg-white/15 text-white/90 border-white/30' },
+};
+
+function guestBadge(category?: string) {
+  return GUEST_BADGE[String(category || 'visitor')] ?? GUEST_BADGE.visitor;
+}
+
+function passLength(days?: number) {
+  if (!days) return '';
+  return days === 1 ? '1-day pass' : `${days}-day pass`;
+}
+
+/** "5:11 PM" from a MySQL datetime or a plain HH:MM:SS time. */
+function timeOnly(value?: string | null) {
+  const raw = String(value || '');
+  const hhmm = raw.includes(' ') ? raw.slice(11, 16) : raw.slice(0, 5);
+  if (!/^\d{1,2}:\d{2}/.test(hhmm)) return '';
+  const [h, m] = hhmm.split(':').map(Number);
+  if (Number.isNaN(h) || Number.isNaN(m)) return '';
+  const suffix = h >= 12 ? 'PM' : 'AM';
+  return `${h % 12 === 0 ? 12 : h % 12}:${String(m).padStart(2, '0')} ${suffix}`;
+}
+
+function scheduleLabel(result: CheckInResult) {
+  const { event_date, end_date, start_time, end_time } = result.schedule;
+  const dates =
+    end_date && end_date !== event_date ? `${formatDay(event_date)} – ${formatDay(end_date)}` : formatDay(event_date);
+  const times = formatTimeRange(start_time, end_time);
+  return times ? `${dates} · ${times}` : dates;
+}
+
+function LightChip({ children }: { children: ReactNode }) {
+  return (
+    <span className="rounded-full border border-white/30 bg-white/10 px-2 py-0.5 font-ui text-[0.6rem] font-semibold uppercase tracking-[0.14em] text-white/90">
+      {children}
+    </span>
+  );
+}
+
+function GuestChip({ category }: { category?: string }) {
+  const badge = guestBadge(category);
+  return (
+    <span
+      className={`rounded-full border px-2 py-0.5 font-ui text-[0.6rem] font-semibold uppercase tracking-[0.14em] ${badge.tone}`}
+    >
+      {badge.en} · {badge.hi}
+    </span>
+  );
+}
+
+function Fact({
+  icon,
+  label,
+  value,
+  sub,
+  tone = 'good',
+}: {
+  icon: ReactNode;
+  label: string;
+  value: string;
+  sub?: string;
+  tone?: 'good' | 'bad';
+}) {
+  return (
+    <div className="flex items-start gap-2.5">
+      <span className={`mt-0.5 shrink-0 ${tone === 'bad' ? 'text-red-700' : 'text-emerald-700'}`}>{icon}</span>
+      <div className="min-w-0">
+        <p className="font-ui text-[0.58rem] uppercase tracking-[0.14em] text-muted">{label}</p>
+        <p className="truncate text-sm text-ink">{value}</p>
+        {sub && <p className="truncate text-xs text-muted">{sub}</p>}
+      </div>
+    </div>
+  );
+}
+
+function SuccessBody({ result }: { result: CheckInResult }) {
+  const entries = result.checkIn;
+  const length = passLength(result.passDays ?? entries.entriesAllowed);
+  const validTo = result.validTo ?? result.schedule.end_date ?? result.schedule.event_date;
+  const close = timeOnly(result.schedule.end_time);
+
+  return (
+    <div>
+      <div className="flex items-start gap-3 bg-emerald-600 px-4 py-4 text-white">
+        <motion.span
+          initial={{ scale: 0.4, opacity: 0 }}
+          animate={{ scale: 1, opacity: 1 }}
+          transition={{ type: 'spring', stiffness: 330, damping: 17 }}
+          className="grid h-14 w-14 shrink-0 place-items-center rounded-full bg-white/15 ring-2 ring-white/40"
+        >
+          <CheckCircle2 size={34} strokeWidth={2.5} />
+        </motion.span>
+        <div className="min-w-0 flex-1">
+          <p className="font-ui text-[0.62rem] uppercase tracking-[0.18em] text-emerald-100/90">
+            Entry allowed · प्रवेश दें
+          </p>
+          <p className="truncate font-display text-xl leading-tight">{result.name}</p>
+          <p className="mt-1.5 flex flex-wrap items-center gap-1.5">
+            <GuestChip category={result.guestCategory} />
+            {length && <LightChip>{length}</LightChip>}
+            {result.source === 'admin_free' && <LightChip>Free issue · निःशुल्क</LightChip>}
+          </p>
+        </div>
+        <span className="shrink-0 rounded-lg bg-white/15 px-2.5 py-1 font-mono text-xs tracking-[0.08em]">
+          {result.reference}
+        </span>
+      </div>
+
+      <div className="space-y-3 px-4 py-4">
+        <p className="flex items-center gap-1.5 rounded-lg bg-emerald-50 px-3 py-2 text-[0.72rem] font-semibold text-emerald-800">
+          <Clock3 size={14} />
+          Valid till {formatDay(validTo)}
+          {close ? ` · gate closes ${close}` : ''}
+        </p>
+
+        <dl className="grid gap-3 sm:grid-cols-2">
+          <Fact
+            icon={<Ticket size={15} />}
+            label="Ticket bought"
+            value={result.ticket.name_en}
+            sub={`${result.event.name_en}${length ? ` · ${length}` : ''}`}
+          />
+          <Fact icon={<CalendarDays size={15} />} label="Event day" value={scheduleLabel(result)} />
+          <Fact
+            icon={<Users size={15} />}
+            label="Attendees"
+            value={`${result.qty} ${result.qty === 1 ? 'person' : 'people'} · ${
+              result.amount === 0 ? 'Free pass' : `${formatRupees(result.amount)} paid`
+            }`}
+            sub={`${result.email} · ${result.phone}`}
+          />
+          <Fact
+            icon={<Clock3 size={15} />}
+            label="Entries"
+            value={`${entries.entriesUsed} of ${entries.entriesAllowed} used · ${entries.entriesLeft} left`}
+            sub={`Event day ${entries.dayNumber} of ${entries.calendarDays} · ${formatDateTime(result.checkedInAt)}`}
+          />
+        </dl>
+
+        {result.attendees && result.attendees.length > 1 && (
+          <div className="rounded-xl border border-emerald-200 bg-emerald-50/70 px-3 py-2">
+            <p className="font-ui text-[0.58rem] uppercase tracking-[0.14em] text-emerald-800">Names on this pass</p>
+            {result.attendees.map((att) => (
+              <p key={att.position} className="mt-0.5 truncate text-xs text-ink">
+                <span className="font-semibold">
+                  {att.position}. {att.name}
+                </span>{' '}
+                · {att.phone}
+              </p>
+            ))}
+          </div>
+        )}
+
+        <p className="flex items-start gap-2 text-[0.7rem] text-muted">
+          <MapPin size={13} className="mt-0.5 shrink-0" />
+          {result.location.venue_en} · {result.location.address_en}, {result.location.city_en},{' '}
+          {result.location.state_en}
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function AlertHeader({
+  label,
+  name,
+  reference,
+  guestCategory,
+  chips,
+  icon,
+}: {
+  label: string;
+  name: string;
+  reference: string;
+  guestCategory: string;
+  chips: ReactNode[];
+  icon: ReactNode;
+}) {
+  return (
+    <div className="flex items-start gap-3 bg-red-700 px-4 py-4 text-white">
+      <motion.span
+        initial={{ scale: 0.4, opacity: 0, rotate: -10 }}
+        animate={{ scale: 1, opacity: 1, rotate: 0 }}
+        transition={{ type: 'spring', stiffness: 300, damping: 16 }}
+        className="grid h-14 w-14 shrink-0 place-items-center rounded-full bg-white/15 ring-2 ring-white/40"
+      >
+        {icon}
+      </motion.span>
+      <div className="min-w-0 flex-1">
+        <p className="font-ui text-[0.62rem] uppercase tracking-[0.18em] text-red-100">{label}</p>
+        <p className="truncate font-display text-xl leading-tight">{name}</p>
+        <p className="mt-1.5 flex flex-wrap items-center gap-1.5">
+          <GuestChip category={guestCategory} />
+          {chips}
+        </p>
+      </div>
+      <span className="shrink-0 rounded-lg bg-white/15 px-2.5 py-1 font-mono text-xs tracking-[0.08em]">
+        {reference}
+      </span>
+    </div>
+  );
+}
+
+function BlockedBody({ feedback }: { feedback: Extract<Feedback, { kind: 'blocked' }> }) {
+  const info = feedback.blocked;
+  const copy = {
+    en: 'Entry blocked by admin',
+    hi: 'प्रवेश रोक गया है',
+    note: 'Call the help desk. Only the admin can lift this block.',
+  };
+  return (
+    <div>
+      <AlertHeader
+        label="Entry blocked · प्रवेश रोकें"
+        name={info.name}
+        reference={info.reference}
+        guestCategory={info.guestCategory}
+        chips={[<LightChip key="chip">{copy.en}</LightChip>]}
+        icon={<ShieldAlert size={30} />}
+      />
+      <div className="px-4 py-4">
+        <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2.5">
+          <p className="font-display text-base leading-tight text-red-900">
+            {copy.en} <span className="text-red-700">· {copy.hi}</span>
+          </p>
+          <p className="mt-1 text-sm font-semibold text-red-900">Reason: {info.reason}</p>
+          {info.blockedBy && <p className="mt-0.5 text-xs text-red-800/80">Blocked by {info.blockedBy}.</p>}
+          <p className="mt-1 text-[0.72rem] text-red-800/90">{feedback.message}</p>
+          <p className="mt-1.5 text-[0.7rem] text-red-800/75">{copy.note}</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DeniedBody({ feedback }: { feedback: Extract<Feedback, { kind: 'denied' }> }) {
+  const denied = feedback.denied;
+  const copy = DENIED_COPY[denied.code];
+  const length = passLength(denied.passDays ?? denied.entriesAllowed);
+  const lastScan = denied.lastEntryDate
+    ? `${formatDay(denied.lastEntryDate)}${timeOnly(denied.lastEntryAt) ? ` at ${timeOnly(denied.lastEntryAt)}` : ''}`
+    : 'Never scanned';
+  const validity = denied.validFrom
+    ? `${
+        denied.validTo && denied.validTo !== denied.validFrom
+          ? `${formatDay(denied.validFrom)} – ${formatDay(denied.validTo)}`
+          : formatDay(denied.validFrom)
+      }${timeOnly(denied.endTime) ? ` · gate closes ${timeOnly(denied.endTime)}` : ''}`
+    : '—';
+
+  return (
+    <div>
+      <AlertHeader
+        label="Entry not allowed · प्रवेश नहीं"
+        name={denied.name}
+        reference={denied.reference}
+        guestCategory={denied.guestCategory}
+        chips={[
+          <LightChip key="reason">{copy.en}</LightChip>,
+          ...(length ? [<LightChip key="length">{length}</LightChip>] : []),
+        ]}
+        icon={<XCircle size={34} strokeWidth={2.5} />}
+      />
+
+      <div className="space-y-3 px-4 py-4">
+        <div className="rounded-xl border border-red-200 bg-red-50 px-3 py-2.5">
+          <p className="font-display text-base leading-tight text-red-900">
+            {copy.en} <span className="text-red-700">· {copy.hi}</span>
+          </p>
+          <p className="mt-1 text-[0.72rem] text-red-800/90">{feedback.message}</p>
+          <p className="mt-1.5 text-[0.7rem] text-red-800/75">{copy.note}</p>
+        </div>
+
+        <dl className="grid gap-3 sm:grid-cols-2">
+          <Fact
+            tone="bad"
+            icon={<Ticket size={15} />}
+            label="Ticket bought"
+            value={denied.ticketName || '—'}
+            sub={`${denied.eventName || '—'}${length ? ` · ${length}` : ''}`}
+          />
+          <Fact
+            tone="bad"
+            icon={<CalendarDays size={15} />}
+            label={denied.code === 'expired' ? 'Was valid' : 'Validity'}
+            value={validity}
+            sub={denied.expiredOn ? `Expired on ${formatDay(denied.expiredOn)}` : undefined}
+          />
+          <Fact
+            tone="bad"
+            icon={<Clock3 size={15} />}
+            label="Last scanned"
+            value={lastScan}
+            sub={
+              denied.entriesAllowed
+                ? `${denied.entriesUsed ?? 0} of ${denied.entriesAllowed} ${
+                    denied.entriesAllowed === 1 ? 'entry' : 'entries'
+                  } used · ${denied.entriesLeft ?? 0} open`
+                : undefined
+            }
+          />
+          <Fact
+            tone="bad"
+            icon={<Users size={15} />}
+            label="Booking"
+            value={
+              denied.code === 'not_paid'
+                ? `Status: ${denied.status ?? 'pending'}`
+                : guestBadge(denied.guestCategory).en === 'Visitor'
+                  ? 'Visitor pass'
+                  : `${guestBadge(denied.guestCategory).en} pass`
+            }
+            sub={denied.source === 'admin_free' ? 'Free issue by admin · निःशुल्क' : undefined}
+          />
+        </dl>
+      </div>
+    </div>
+  );
+}
+
+function ErrorBody({ message, notFound }: { message: string; notFound?: boolean }) {
+  return (
+    <div className="flex items-start gap-3 px-4 py-4">
+      <span className="grid h-12 w-12 shrink-0 place-items-center rounded-full bg-red-500 text-white">
+        <XCircle size={26} />
+      </span>
+      <div className="min-w-0">
+        <p className="font-ui text-[0.62rem] uppercase tracking-[0.18em] text-red-700">
+          {notFound ? 'Pass not found' : 'Pass not accepted'}
+        </p>
+        <p className="mt-0.5 font-display text-lg leading-tight text-red-900">{message}</p>
+        <p className="mt-1 text-xs text-muted">Check the code and try again, or search the booking in the admin panel.</p>
+      </div>
+    </div>
+  );
+}
+
+export default function ScanConsole({
+  scan,
+  onCheckedIn,
+  title = 'Scan a pass',
+}: {
+  scan: (code: string) => Promise<CheckInResult>;
+  onCheckedIn?: () => void;
+  title?: string;
+}) {
+  const [manual, setManual] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [feedback, setFeedback] = useState<Feedback | null>(null);
+  const [camera, setCamera] = useState<'idle' | 'starting' | 'running' | 'error'>('idle');
+  const [cameraError, setCameraError] = useState('');
+  const [stoppedAfterScan, setStoppedAfterScan] = useState(false);
+
+  const scannerRef = useRef<Html5Qrcode | null>(null);
+  const busyRef = useRef(false);
+  const scanRef = useRef(scan);
+  scanRef.current = scan;
+  const onCheckedInRef = useRef(onCheckedIn);
+  onCheckedInRef.current = onCheckedIn;
+  const lastScanRef = useRef<{ code: string; at: number }>({ code: '', at: 0 });
+  const readerIdRef = useRef(`qr-reader-${Math.random().toString(36).slice(2, 9)}`);
+  const runScanRef = useRef<(code: string) => Promise<void>>(async () => undefined);
+
+  const stopCamera = async () => {
+    const scanner = scannerRef.current;
+    scannerRef.current = null;
+    if (scanner) {
+      try {
+        await scanner.stop();
+      } catch {
+        // Scanner was not running.
+      }
+      try {
+        scanner.clear();
+      } catch {
+        // Element already detached.
+      }
+    }
+    setCamera('idle');
+  };
+
+  const startCamera = async () => {
+    if (camera === 'starting' || camera === 'running') return;
+    setCameraError('');
+    setFeedback(null);
+    setStoppedAfterScan(false);
+    setCamera('starting');
+    try {
+      const { Html5Qrcode: Scanner } = await import('html5-qrcode');
+      const scanner = new Scanner(readerIdRef.current, { verbose: false });
+      scannerRef.current = scanner;
+      await scanner.start(
+        { facingMode: 'environment' },
+        {
+          fps: 10,
+          qrbox: (width, height) => {
+            const edge = Math.floor(Math.min(width, height) * 0.68);
+            return { width: Math.max(160, edge), height: Math.max(160, edge) };
+          },
+          aspectRatio: 1,
+        },
+        (decodedText) => {
+          void runScanRef.current(decodedText);
+        },
+        () => undefined,
+      );
+      setCamera('running');
+    } catch {
+      const scanner = scannerRef.current;
+      scannerRef.current = null;
+      if (scanner) {
+        try {
+          scanner.clear();
+        } catch {
+          // Nothing rendered yet.
+        }
+      }
+      setCamera('error');
+      setCameraError('Camera access was blocked. Allow camera permission, or type the code below.');
+    }
+  };
+
+  const startCameraRef = useRef(startCamera);
+  startCameraRef.current = startCamera;
+  const stopCameraRef = useRef(stopCamera);
+  stopCameraRef.current = stopCamera;
+
+  const runScan = async (raw: string) => {
+    const code = raw.trim();
+    if (!code || busyRef.current) return;
+
+    const now = Date.now();
+    if (lastScanRef.current.code === code && now - lastScanRef.current.at < DEDUPE_MS) return;
+    lastScanRef.current = { code, at: now };
+
+    busyRef.current = true;
+    setBusy(true);
+    setStoppedAfterScan(Boolean(scannerRef.current));
+    try {
+      const result = await scanRef.current(code);
+      setFeedback({ kind: 'success', result });
+      setManual('');
+      onCheckedInRef.current?.();
+    } catch (error) {
+      if (error instanceof AdminApiError && !error.status) lastScanRef.current = { code: '', at: 0 };
+      if (error instanceof AdminApiError) {
+        const details = error.details as
+          | (Partial<BlockedInfo> &
+              Partial<DenialInfo> & {
+                blocked?: boolean;
+                denied?: boolean;
+                code?: string;
+                reason?: string;
+                ticket?: { name_en?: string };
+                event?: { name_en?: string };
+                schedule?: { end_time?: string };
+              })
+          | undefined;
+        if (details?.blocked) {
+          setFeedback({
+            kind: 'blocked',
+            message: error.message,
+            blocked: {
+              reference: String(details.reference ?? code.toUpperCase()),
+              name: String(details.name ?? 'This devotee'),
+              guestCategory: String(details.guestCategory ?? 'visitor'),
+              reason: String(details.reason ?? 'Blocked by the admin.'),
+              blockedBy: details.blockedBy ? String(details.blockedBy) : null,
+            },
+          });
+        } else if (details?.denied) {
+          const known: DenialCode[] = ['not_paid', 'not_started', 'expired', 'entries_exhausted', 'already_scanned'];
+          const rawCode = String(details.code ?? details.reason ?? '');
+          setFeedback({
+            kind: 'denied',
+            message: error.message,
+            denied: {
+              reference: String(details.reference ?? code.toUpperCase()),
+              name: String(details.name ?? 'This devotee'),
+              guestCategory: String(details.guestCategory ?? 'visitor'),
+              code: known.includes(rawCode as DenialCode) ? (rawCode as DenialCode) : 'unknown',
+              status: details.status,
+              source: details.source,
+              passDays: details.passDays,
+              validFrom: details.validFrom,
+              validTo: details.validTo,
+              expiredOn: details.expiredOn,
+              entriesAllowed: details.entriesAllowed,
+              entriesUsed: details.entriesUsed,
+              entriesLeft: details.entriesLeft,
+              lastEntryDate: details.lastEntryDate,
+              lastEntryAt: details.lastEntryAt,
+              ticketName: details.ticketName ?? details.ticket?.name_en,
+              eventName: details.eventName ?? details.event?.name_en,
+              endTime: details.endTime ?? details.schedule?.end_time,
+            },
+          });
+        } else {
+          setFeedback({ kind: 'error', message: error.message, notFound: error.status === 404 });
+        }
+      } else {
+        setFeedback({
+          kind: 'error',
+          message: 'Could not reach the server. Check the connection and try again.',
+        });
+      }
+    } finally {
+      busyRef.current = false;
+      setBusy(false);
+      // One scan, one decision — the camera stops so the result popup is the only thing on screen.
+      await stopCameraRef.current();
+    }
+  };
+  runScanRef.current = runScan;
+
+  useEffect(() => {
+    return () => {
+      const scanner = scannerRef.current;
+      scannerRef.current = null;
+      if (scanner) {
+        scanner
+          .stop()
+          .catch(() => undefined)
+          .finally(() => {
+            try {
+              scanner.clear();
+            } catch {
+              // Element already detached.
+            }
+          });
+      }
+    };
+  }, []);
+
+  const submitManual = (event: FormEvent) => {
+    event.preventDefault();
+    void runScan(manual);
+  };
+
+  const closeResult = () => {
+    setFeedback(null);
+    setStoppedAfterScan(false);
+  };
+
+  const scanNext = () => {
+    setFeedback(null);
+    void startCameraRef.current();
+  };
+
+  const edge =
+    feedback?.kind === 'success'
+      ? 'border-emerald-300'
+      : feedback?.kind === 'error'
+        ? 'border-red-300'
+        : 'border-red-400';
+
+  return (
+    <div className="overflow-hidden rounded-2xl border border-line bg-white shadow-[0_18px_40px_-34px_rgba(15,35,66,.45)]">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line px-4 py-3.5 sm:px-5">
+        <div className="flex items-center gap-2.5">
+          <span className="grid h-9 w-9 place-items-center rounded-xl bg-sindoor text-marigold">
+            <ScanLine size={17} />
+          </span>
+          <div>
+            <h2 className="font-display text-xl leading-tight text-ink">{title}</h2>
+            <p className="text-[0.7rem] text-muted">QR pass or reference number · checked against the live database</p>
+          </div>
+        </div>
+        {camera === 'running' ? (
+          <button
+            type="button"
+            onClick={() => void stopCamera()}
+            className="inline-flex items-center gap-1.5 rounded-xl border border-red-200 bg-red-50 px-3 py-2 font-ui text-xs font-semibold text-red-700 transition-colors hover:bg-red-100"
+          >
+            <CameraOff size={14} /> Stop camera
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={() => void startCamera()}
+            disabled={camera === 'starting'}
+            className="inline-flex items-center gap-1.5 rounded-xl bg-saffron px-3 py-2 font-ui text-xs font-semibold text-white transition-colors hover:bg-saffron-dark disabled:opacity-60"
+          >
+            {camera === 'starting' ? <Loader2 size={14} className="animate-spin" /> : <Camera size={14} />}
+            {camera === 'starting' ? 'Starting camera…' : stoppedAfterScan ? 'Reopen camera' : 'Start camera'}
+          </button>
+        )}
+      </div>
+
+      <div className="space-y-4 p-4 sm:p-5">
+        <div className="relative overflow-hidden rounded-2xl bg-sindoor-deep">
+          <div id={readerIdRef.current} className="qr-reader min-h-[260px] w-full sm:min-h-[320px]" />
+
+          {camera === 'running' && (
+            <>
+              <span className="pointer-events-none absolute left-4 top-4 h-7 w-7 rounded-tl-lg border-l-2 border-t-2 border-marigold/80" />
+              <span className="pointer-events-none absolute right-4 top-4 h-7 w-7 rounded-tr-lg border-r-2 border-t-2 border-marigold/80" />
+              <span className="pointer-events-none absolute bottom-4 left-4 h-7 w-7 rounded-bl-lg border-b-2 border-l-2 border-marigold/80" />
+              <span className="pointer-events-none absolute bottom-4 right-4 h-7 w-7 rounded-br-lg border-b-2 border-r-2 border-marigold/80" />
+              <span className="scan-line pointer-events-none" />
+              <span className="pointer-events-none absolute left-1/2 top-4 -translate-x-1/2 rounded-full bg-black/45 px-2.5 py-1 font-ui text-[0.6rem] uppercase tracking-[0.16em] text-white/80">
+                Point at the pass QR
+              </span>
+            </>
+          )}
+
+          {camera !== 'running' && (
+            <div className="absolute inset-0 grid place-items-center px-6 text-center">
+              <div className="max-w-[260px]">
+                {camera === 'starting' ? (
+                  <>
+                    <Loader2 size={30} className="mx-auto animate-spin text-marigold" />
+                    <p className="mt-3 font-ui text-sm text-cream-on-dark/75">Opening the camera…</p>
+                  </>
+                ) : (
+                  <>
+                    <span className="mx-auto grid h-14 w-14 place-items-center rounded-full border border-white/15 bg-white/[0.06]">
+                      <QrCode size={26} className="text-marigold" />
+                    </span>
+                    <p className="mt-3 font-ui text-sm text-cream-on-dark/75">
+                      {camera === 'error' ? 'Camera unavailable' : 'Camera is off'}
+                    </p>
+                    <p className="mt-1 text-[0.7rem] leading-relaxed text-cream-on-dark/45">
+                      {cameraError ||
+                        (stoppedAfterScan
+                          ? 'Camera stopped after the last scan. Reopen it for the next devotee.'
+                          : 'Start the camera to scan a devotee pass, or enter the code below.')}
+                    </p>
+                  </>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+
+        <form onSubmit={submitManual} className="flex flex-col gap-2 sm:flex-row">
+          <div className="relative flex-1">
+            <Hash size={15} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-muted/60" />
+            <input
+              value={manual}
+              onChange={(event) => setManual(event.target.value.toUpperCase())}
+              placeholder="AB26-XXXXXX or QR code"
+              autoComplete="off"
+              spellCheck={false}
+              aria-label="Pass reference or QR code"
+              className="field !py-3 !pl-10 font-mono text-sm tracking-[0.1em]"
+            />
+          </div>
+          <button
+            type="submit"
+            disabled={busy || !manual.trim()}
+            className="btn btn-primary inline-flex items-center justify-center gap-2 !py-3 disabled:opacity-50 sm:w-auto"
+          >
+            {busy ? <Loader2 size={16} className="animate-spin" /> : <Search size={16} />}
+            {busy ? 'Verifying…' : 'Check pass'}
+          </button>
+        </form>
+
+        {busy && (
+          <p className="flex items-center gap-2 text-xs text-muted" role="status">
+            <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-line border-t-saffron" />
+            Matching this pass against the booking register…
+          </p>
+        )}
+      </div>
+
+      <AnimatePresence>
+        {feedback && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.18 }}
+            className="fixed inset-0 z-50 grid justify-center overflow-y-auto bg-ink/55 p-3 backdrop-blur-sm sm:items-center sm:p-6"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Scan result"
+            onClick={closeResult}
+          >
+            <motion.div
+              initial={{ opacity: 0, y: 18, scale: 0.96 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 10, scale: 0.98 }}
+              transition={{ duration: 0.24, ease: [0.22, 1, 0.36, 1] }}
+              onClick={(event) => event.stopPropagation()}
+              className={`w-full max-w-lg self-start overflow-hidden rounded-2xl border bg-white shadow-[0_30px_70px_-20px_rgba(15,35,66,.55)] sm:self-center ${edge}`}
+            >
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={closeResult}
+                  aria-label="Close result"
+                  className="absolute right-3 top-3 z-10 grid h-8 w-8 place-items-center rounded-full bg-black/20 text-white transition-colors hover:bg-black/35"
+                >
+                  <X size={16} />
+                </button>
+                {feedback.kind === 'success' ? (
+                  <SuccessBody result={feedback.result} />
+                ) : feedback.kind === 'error' ? (
+                  <ErrorBody message={feedback.message} notFound={feedback.notFound} />
+                ) : feedback.kind === 'blocked' ? (
+                  <BlockedBody feedback={feedback} />
+                ) : (
+                  <DeniedBody feedback={feedback} />
+                )}
+              </div>
+
+              <div className="flex flex-wrap items-center justify-between gap-2 border-t border-line bg-line/10 px-4 py-3">
+                <p className="text-[0.68rem] text-muted">
+                  {feedback.kind === 'success'
+                    ? 'Devotee verified — let them through.'
+                    : 'This pass cannot enter. Point the devotee to the help desk.'}
+                </p>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={closeResult}
+                    className="rounded-lg border border-line bg-white px-3 py-1.5 font-ui text-xs font-semibold text-ink transition-colors hover:bg-line/20"
+                  >
+                    Close
+                  </button>
+                  <button
+                    type="button"
+                    onClick={scanNext}
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-saffron px-3 py-1.5 font-ui text-xs font-semibold text-white transition-colors hover:bg-saffron-dark"
+                  >
+                    <Camera size={13} /> Scan next pass
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}

@@ -78,10 +78,19 @@ body {
   overflow-x: hidden;
 }
 
-h1, h2, h3, h4, .font-display {
+h1, h2, h3, h4 {
   font-family: var(--f-display);
   font-weight: 600;
   color: var(--c-ink);
+  line-height: 1.08;
+  letter-spacing: -.005em;
+}
+
+/* `.font-display` must not carry a colour — as a class selector it outranks
+   `text-white` / `text-cream-on-dark` written later in the cascade. */
+.font-display {
+  font-family: var(--f-display);
+  font-weight: 600;
   line-height: 1.08;
   letter-spacing: -.005em;
 }
@@ -182,6 +191,257 @@ a:hover { color: var(--c-saffron-ink); }
   100% { background-position: 200% 0; }
 }
 
+/* ============================================================
+   Design system — section rhythm, buttons and surfaces taken
+   from adhyatmikbharatexpo.com's theme.css.
+   ============================================================ */
+
+.wrap {
+  width: 100%;
+  max-width: var(--container);
+  margin-inline: auto;
+  padding-inline: var(--gutter);
+}
+
+.section {
+  position: relative;
+  padding-block: var(--section-y);
+  overflow: hidden;
+}
+.section--cream { background: var(--c-sandal); }
+.section--tint  { background: var(--c-sandal-2); }
+.section--dark  { background: var(--c-sindoor);      color: var(--c-cream-on-dark); }
+.section--deep  { background: var(--c-sindoor-deep); color: var(--c-cream-on-dark); }
+
+.section--dark h1, .section--dark h2, .section--dark h3, .section--dark h4,
+.section--deep h1, .section--deep h2, .section--deep h3, .section--deep h4 {
+  color: var(--c-white);
+}
+
+.section-inner { position: relative; z-index: 1; }
+
+/* Tiled lotus motif behind the dark bands */
+.pattern-lotus::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  background: url('/pattern-lotus.svg') repeat;
+  background-size: 190px 190px;
+  opacity: .08;
+  pointer-events: none;
+}
+
+/* Temple-window silhouette used for image and city tiles */
+.arch {
+  border-radius: 999px 999px var(--radius) var(--radius);
+  overflow: hidden;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: .55rem;
+  padding: .95rem 1.9rem;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font-family: var(--f-ui);
+  font-weight: 600;
+  font-size: 1rem;
+  line-height: 1.1;
+  letter-spacing: .045em;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    transform .3s cubic-bezier(.22, 1, .36, 1),
+    box-shadow .3s ease,
+    background-color .3s ease,
+    border-color .3s ease,
+    color .3s ease;
+}
+.btn:active { transform: translateY(1px) scale(.99); }
+
+.btn-primary {
+  background: var(--grad-hand);
+  color: var(--c-white);
+  box-shadow: 0 14px 34px -16px rgba(238, 44, 143, .75);
+}
+.btn-primary:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 22px 46px -16px rgba(238, 44, 143, .9);
+}
+
+.btn-outline {
+  background: rgba(8, 22, 43, .5);
+  color: var(--c-white);
+  border-color: rgba(255, 255, 255, .55);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+.btn-outline:hover {
+  background: rgba(255, 255, 255, .14);
+  border-color: var(--c-white);
+  transform: translateY(-2px);
+}
+
+.btn-navy { background: var(--c-sindoor); color: var(--c-white); }
+.btn-navy:hover { background: var(--c-sindoor-deep); transform: translateY(-2px); }
+
+.btn-ghost {
+  background: transparent;
+  color: var(--c-saffron-ink);
+  border-color: rgba(238, 44, 143, .35);
+}
+.btn-ghost:hover {
+  background: rgba(238, 44, 143, .08);
+  border-color: var(--c-saffron);
+}
+
+.btn-sm { padding: .62rem 1.2rem; font-size: .92rem; }
+.btn-block { width: 100%; }
+
+.eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: .7rem;
+  font-family: var(--f-ui);
+  font-weight: 600;
+  font-size: .8rem;
+  letter-spacing: .24em;
+  text-transform: uppercase;
+  color: var(--c-saffron-ink);
+}
+.eyebrow::before,
+.eyebrow--center::after {
+  content: '';
+  width: 30px;
+  height: 1px;
+  background: currentColor;
+  opacity: .55;
+}
+.eyebrow--light { color: var(--c-marigold); }
+
+.section-head {
+  max-width: 62ch;
+  margin: 0 auto clamp(2.5rem, 5vw, 4rem);
+  text-align: center;
+}
+.section-head h2 { font-size: var(--fs-h2); margin-top: .9rem; }
+.section-head p {
+  margin-top: .9rem;
+  font-size: var(--fs-lead);
+  font-weight: 300;
+  color: var(--c-muted);
+}
+.section--dark .section-head p,
+.section--deep .section-head p { color: rgba(232, 241, 248, .72); }
+
+.card {
+  background: linear-gradient(160deg, var(--c-white) 0%, var(--c-sandal-2) 100%);
+  border: 1px solid var(--c-line);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow);
+}
+.card--dark {
+  background: linear-gradient(160deg, rgba(19, 35, 66, .92), rgba(10, 24, 48, .96));
+  border: 1px solid rgba(19, 187, 232, .22);
+  box-shadow: 0 22px 50px -26px rgba(0, 0, 0, .7);
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: .4rem;
+  padding: .32rem .8rem;
+  border-radius: 999px;
+  font-family: var(--f-ui);
+  font-weight: 600;
+  font-size: .74rem;
+  letter-spacing: .16em;
+  text-transform: uppercase;
+}
+.chip--lotus   { background: rgba(238, 44, 143, .12); color: var(--c-lotus-ink); }
+.chip--marigold { background: rgba(255, 210, 31, .16); color: #8a6a00; }
+.chip--on-dark { background: rgba(255, 210, 31, .14); color: var(--c-marigold); }
+
+/* Seamless yatra-route ticker: the track holds the list once plus one
+   duplicate, so -50% lands exactly on the duplicate's first item. */
+.marquee {
+  animation: marquee 60s linear infinite;
+}
+.marquee:hover {
+  animation-play-state: paused;
+}
+
+@keyframes marquee {
+  from { transform: translateX(0); }
+  to { transform: translateX(-50%); }
+}
+
+/* Form field — white surface, lotus focus ring */
+.field {
+  width: 100%;
+  padding: .8rem 1rem;
+  background: var(--c-white);
+  border: 1px solid var(--c-line);
+  border-radius: 12px;
+  font-family: var(--f-body);
+  font-size: 1rem;
+  color: var(--c-ink);
+  transition: border-color .25s ease, box-shadow .25s ease;
+}
+.field::placeholder { color: rgba(95, 107, 128, .6); }
+.field:focus {
+  outline: none;
+  border-color: var(--c-saffron);
+  box-shadow: 0 0 0 3px rgba(238, 44, 143, .14);
+}
+.field:disabled { opacity: .55; cursor: not-allowed; }
+
+.field-label {
+  display: block;
+  margin-bottom: .45rem;
+  font-family: var(--f-ui);
+  font-weight: 600;
+  font-size: .74rem;
+  letter-spacing: .16em;
+  text-transform: uppercase;
+  color: var(--c-muted);
+}
+
+.field-error {
+  margin-top: .35rem;
+  font-size: .8rem;
+  color: var(--c-error);
+}
+
+/* Gate scanner viewport (html5-qrcode injects its own video element) */
+.qr-reader { position: relative; }
+.qr-reader video {
+  width: 100% !important;
+  height: 100% !important;
+  min-height: 260px;
+  object-fit: cover;
+  border-radius: 14px;
+}
+.qr-reader img { display: none; }
+
+.scan-line {
+  position: absolute;
+  left: 9%;
+  right: 9%;
+  height: 2px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, transparent, var(--c-marigold), transparent);
+  box-shadow: 0 0 18px rgba(255, 210, 31, .75);
+  animation: scanSweep 2.6s ease-in-out infinite;
+}
+@keyframes scanSweep {
+  0%, 100% { top: 20%; opacity: .3; }
+  50% { top: 80%; opacity: 1; }
+}
+
 /* Focus accessibility — matching site */
 *:focus-visible {
   outline: 3px solid var(--c-saffron);
@@ -200,4 +460,5 @@ button, a {
     transition-duration: 0.01ms !important;
   }
   html { scroll-behavior: auto; }
+  .marquee { animation: none !important; }
 }

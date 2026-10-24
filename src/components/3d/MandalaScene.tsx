@@ -95,7 +95,7 @@ function MandalaPetals({
   );
 }
 
-function CentralOm({ reduced }: { reduced: boolean }) {
+function CentralOm() {
   const lightRef = useRef<THREE.PointLight>(null);
   const coreRef = useRef<THREE.Mesh>(null);
 
@@ -149,7 +149,7 @@ export default function MandalaScene({ reduced }: MandalaSceneProps) {
           <MandalaPetals radius={1.8} count={8} color="#EE2C8F" speed={0.25} y={0} />
           <MandalaPetals radius={2.3} count={12} color="#13BBE8" speed={-0.18} y={0} />
           {/* Central glowing core */}
-          <CentralOm reduced={reduced} />
+          <CentralOm />
         </Float>
         {!reduced && (
           <Sparkles count={50} scale={[6, 6, 3]} size={3} speed={0.3} opacity={0.5} color="#FFD21F" />

@@ -27,11 +27,11 @@ function Diya() {
       lightRef.current.intensity = 3 + Math.sin(t * 10) * 0.8 + Math.sin(t * 17) * 0.4;
     }
     if (glowRef.current) {
-      glowRef.current.material.opacity = 0.15 + Math.sin(t * 5) * 0.05;
+      (glowRef.current.material as THREE.MeshBasicMaterial).opacity = 0.15 + Math.sin(t * 5) * 0.05;
     }
     if (haloRef.current) {
       haloRef.current.rotation.z = t * 0.3;
-      haloRef.current.material.opacity = 0.08 + Math.sin(t * 4) * 0.03;
+      (haloRef.current.material as THREE.MeshBasicMaterial).opacity = 0.08 + Math.sin(t * 4) * 0.03;
     }
   });
 
@@ -47,19 +47,19 @@ function Diya() {
             rotation={[0, -angle, 0.3]}
           >
             <coneGeometry args={[0.28, 0.5, 4]} />
-            <meshStandardMaterial color="#13BBE8" metalness={0.7} roughness={0.25} side={THREE.DoubleSide} />
+            <meshStandardMaterial color="#13BBE8" metalness={0.35} roughness={0.4} side={THREE.DoubleSide} />
           </mesh>
         );
       })}
       {/* Diya bowl - lower half */}
       <mesh rotation={[0, 0, 0]} position={[0, -0.5, 0]}>
         <sphereGeometry args={[1, 32, 16, 0, Math.PI * 2, Math.PI / 2, Math.PI / 2]} />
-        <meshStandardMaterial color="#13BBE8" metalness={0.85} roughness={0.15} side={THREE.DoubleSide} />
+        <meshStandardMaterial color="#F39A1E" metalness={0.45} roughness={0.32} side={THREE.DoubleSide} />
       </mesh>
       {/* Bowl rim */}
       <mesh position={[0, -0.5, 0]}>
         <torusGeometry args={[1, 0.04, 8, 32]} />
-        <meshStandardMaterial color="#5BD4F0" metalness={0.9} roughness={0.1} />
+        <meshStandardMaterial color="#FFD21F" metalness={0.5} roughness={0.25} />
       </mesh>
       {/* Oil surface glow */}
       <mesh ref={glowRef} position={[0, -0.48, 0]} rotation={[-Math.PI / 2, 0, 0]}>
@@ -94,21 +94,20 @@ function Embers({ count = 500 }: { count?: number }) {
   const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
   const actualCount = isMobile ? Math.floor(count / 3) : count;
 
-  const positions = useMemo(() => {
+  const { geometry, speeds } = useMemo(() => {
     const arr = new Float32Array(actualCount * 3);
-    const speeds = new Float32Array(actualCount);
+    const velocities = new Float32Array(actualCount);
     for (let i = 0; i < actualCount; i++) {
       const angle = Math.random() * Math.PI * 2;
       const radius = 1.5 + Math.random() * 7;
       arr[i * 3] = Math.cos(angle) * radius;
       arr[i * 3 + 1] = -3 + Math.random() * 7;
       arr[i * 3 + 2] = Math.sin(angle) * radius - 1;
-      speeds[i] = 0.005 + Math.random() * 0.012;
+      velocities[i] = 0.005 + Math.random() * 0.012;
     }
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(arr, 3));
-    (geo as any)._speeds = speeds;
-    return geo;
+    return { geometry: geo, speeds: velocities };
   }, [actualCount]);
 
   useFrame((state) => {
@@ -116,7 +115,6 @@ function Embers({ count = 500 }: { count?: number }) {
     const t = state.clock.elapsedTime;
     const posAttr = ref.current.geometry.attributes.position as THREE.BufferAttribute;
     const arr = posAttr.array as Float32Array;
-    const speeds = (ref.current.geometry as any)._speeds as Float32Array;
     for (let i = 0; i < actualCount; i++) {
       arr[i * 3 + 1] += speeds[i] + Math.sin(t + i) * 0.003;
       if (arr[i * 3 + 1] > 4.5) arr[i * 3 + 1] = -3;
@@ -126,7 +124,7 @@ function Embers({ count = 500 }: { count?: number }) {
   });
 
   return (
-    <points ref={ref} geometry={positions}>
+    <points ref={ref} geometry={geometry}>
       <pointsMaterial
         size={0.05}
         color="#5BD4F0"
@@ -214,9 +212,18 @@ export default function HeroScene({ reduced }: HeroSceneProps) {
     >
       <fog attach="fog" args={['#0A1830', 8, 18]} />
       <CameraParallax reduced={reduced} />
-      <ambientLight intensity={0.2} color="#0A7FA6" />
+      <ambientLight intensity={0.35} color="#0A7FA6" />
+      <directionalLight position={[3, 4, 5]} intensity={1.6} color="#FFD21F" />
+      <directionalLight position={[-4, -1, 3]} intensity={0.9} color="#EE2C8F" />
+      <directionalLight position={[0, 3, -4]} intensity={0.6} color="#13BBE8" />
       <Suspense fallback={null}>
-        <Float speed={reduced ? 0 : 1.5} rotationIntensity={reduced ? 0 : 0.35} floatIntensity={reduced ? 0 : 0.5}>
+        <Float
+          speed={reduced ? 0 : 1.5}
+          rotationIntensity={reduced ? 0 : 0.35}
+          floatIntensity={reduced ? 0 : 0.5}
+          position={[0, -2.5, 0]}
+          scale={0.62}
+        >
           <Diya />
         </Float>
         {!reduced && <Embers count={500} />}

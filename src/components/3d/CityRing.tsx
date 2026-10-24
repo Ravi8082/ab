@@ -5,6 +5,7 @@ import * as THREE from 'three';
 import type { CityItem } from '@/types';
 import { useApp } from '@/context/AppContext';
 import { ui, uiT } from '@/i18n';
+import { formatEventDate } from '@/lib/format';
 
 interface OrbProps {
   city: CityItem;
@@ -87,7 +88,7 @@ function CityOrb({ city, index, total, hovered, setHovered, onSelect, lang }: Or
           </p>
           {isHovered && !soldOut && (
             <div className="mt-1 px-2 py-1 rounded-md bg-navy-900/90 border border-gold/30">
-              <p className="text-[10px] text-gold-light">{city.date}</p>
+              <p className="text-[10px] text-gold-light">{formatEventDate(city.date, lang)}</p>
               <p className="text-[10px] text-ivory/60">{seatsLeft} {uiT(ui.sundarkand.seatsLeft, lang)}</p>
             </div>
           )}

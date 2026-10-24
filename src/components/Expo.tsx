@@ -1,9 +1,14 @@
 import { lazy, Suspense, useRef } from 'react';
+import { Link } from 'react-router-dom';
 import { motion, useMotionValue, useSpring, useTransform } from 'framer-motion';
-import { Flame, Ticket, Check } from 'lucide-react';
+import { ArrowRight, Flame, Store } from 'lucide-react';
 import { useApp } from '@/context/AppContext';
 import { ui, uiT } from '@/i18n';
 import type { CityItem, TicketType, TierCard } from '@/types';
+import TicketCard from '@/components/TicketCard';
+import MandalaDivider from '@/components/MandalaDivider';
+import CountdownPill from '@/components/CountdownPill';
+import { formatRupees, priceInfo } from '@/lib/pricing';
 
 const YajnaScene = lazy(() => import('@/components/3d/YajnaScene'));
 
@@ -31,18 +36,18 @@ function BenefitCard({ card, index }: { card: TierCard; index: number }) {
         y.set(0);
       }}
       style={{ rotateX, rotateY, transformStyle: 'preserve-3d' }}
-      className="relative rounded-14 p-6 border border-sky/20 bg-gradient-to-br from-sandal to-sandal-2 min-h-[200px] shadow-sm"
+      className="card relative min-h-[210px] p-6"
       initial={{ opacity: 0, rotateX: 40, y: 60 }}
       whileInView={{ opacity: 1, rotateX: 0, y: 0 }}
       viewport={{ once: true }}
       transition={{ duration: 0.6, delay: index * 0.08, ease: [0.22, 1, 0.36, 1] }}
     >
       <div style={{ transform: 'translateZ(30px)' }}>
-        <div className="w-10 h-10 rounded-xl bg-saffron/15 flex items-center justify-center mb-4">
-          <span className="font-display text-lg text-saffron-ink">{index + 1}</span>
+        <div className="mb-4 grid h-10 w-10 place-items-center rounded-full bg-sindoor font-display text-lg text-marigold">
+          {index + 1}
         </div>
-        <h4 className="font-display text-lg text-ink mb-2">{uiT(card.title, lang)}</h4>
-        <p className="text-muted text-sm font-body font-light leading-relaxed">
+        <h4 className="mb-2 font-display text-lg text-ink">{uiT(card.title, lang)}</h4>
+        <p className="text-sm font-light leading-relaxed text-muted">
           {uiT(card.description, lang)}
         </p>
       </div>
@@ -60,28 +65,30 @@ export default function Expo({ onRegister, tickets, tierCards }: ExpoProps) {
   const { lang, reducedMotion } = useApp();
   const expoTickets = tickets.filter((t) => t.event_id === 'evt-expo');
   const rajsuyaTicket = expoTickets.find((t) => t.id === 'tk-rajsuya');
+  const rajsuyaPrice = rajsuyaTicket ? priceInfo(rajsuyaTicket) : null;
   const visitorTicket = expoTickets.find((t) => t.id === 'tk-expo-visitor');
   const benefits = tierCards.length > 0 ? tierCards : ui.expo.benefits;
 
   return (
-    <section id="expo" className="relative py-24 px-4 sm:px-6 overflow-hidden bg-sandal-2">
-      <div className="absolute left-1/2 top-0 -translate-x-1/2 w-[70vw] max-w-[700px] h-[300px] rounded-full bg-saffron/5 blur-3xl pointer-events-none animate-breathe" />
+    <section id="expo" className="section section--tint">
+      <div className="pointer-events-none absolute left-1/2 top-0 h-[300px] w-[70vw] max-w-[700px] -translate-x-1/2 animate-breathe rounded-full bg-saffron/5 blur-3xl" />
 
-      <div className="relative mx-auto max-w-container" style={{ paddingLeft: 'var(--gutter)', paddingRight: 'var(--gutter)' }}>
+      <div className="wrap section-inner">
         <motion.div
-          className="text-center mb-16"
+          className="section-head"
           initial={{ opacity: 0, y: 30 }}
           whileInView={{ opacity: 1, y: 0 }}
           viewport={{ once: true }}
           transition={{ duration: 0.8, ease: [0.22, 1, 0.36, 1] }}
         >
-          <h2 className="font-display text-4xl sm:text-5xl md:text-6xl text-ink mb-4">
-            <span className="text-gradient-saffron">{uiT(ui.expo.title, lang)}</span>
-          </h2>
-          <p className="text-muted text-lg font-body font-light">{uiT(ui.expo.tagline, lang)}</p>
+          <span className="eyebrow eyebrow--center">
+            {lang === 'en' ? 'Three days · New Delhi' : 'तीन दिन · नई दिल्ली'}
+          </span>
+          <h2 className="font-display text-ink">{uiT(ui.expo.title, lang)}</h2>
+          <p>{uiT(ui.expo.tagline, lang)}</p>
         </motion.div>
 
-        {rajsuyaTicket && (
+        {rajsuyaTicket && rajsuyaPrice && (
           <motion.div
             className="relative max-w-5xl mx-auto mb-20"
             initial={{ opacity: 0, y: 50 }}
@@ -89,13 +96,13 @@ export default function Expo({ onRegister, tickets, tierCards }: ExpoProps) {
             viewport={{ once: true }}
             transition={{ duration: 1, ease: [0.22, 1, 0.36, 1] }}
           >
-            <div className="relative rounded-24 overflow-hidden gold-border shimmer-overlay">
-              <div className="grid lg:grid-cols-2 gap-0">
-                <div className="relative h-[300px] lg:h-auto min-h-[350px] bg-gradient-to-br from-sindoor to-sindoor-deep">
+            <div className="card--dark pattern-lotus relative overflow-hidden rounded-[var(--radius-lg)]">
+              <div className="section-inner grid gap-0 lg:grid-cols-2">
+                <div className="relative h-[300px] min-h-[350px] bg-gradient-to-br from-sindoor to-sindoor-deep lg:h-auto">
                   <Suspense
                     fallback={
-                      <div className="flex items-center justify-center h-full">
-                        <Flame size={48} className="text-saffron animate-flicker" />
+                      <div className="flex h-full items-center justify-center">
+                        <Flame size={48} className="animate-flicker text-saffron" />
                       </div>
                     }
                   >
@@ -103,28 +110,40 @@ export default function Expo({ onRegister, tickets, tierCards }: ExpoProps) {
                   </Suspense>
                 </div>
 
-                <div className="p-8 lg:p-10 flex flex-col justify-center bg-gradient-to-br from-sandal to-sandal-2">
-                  <div className="flex items-center gap-3 mb-4">
-                    <div className="px-3 py-1 rounded-full bg-saffron/15 text-saffron-ink text-xs font-ui font-semibold uppercase tracking-wider">
+                <div className="flex flex-col justify-center p-8 lg:p-12">
+                  <div className="mb-5 flex items-center gap-3">
+                    <span className="chip chip--on-dark">
                       {lang === 'en' ? 'Premium' : 'प्रीमियम'}
-                    </div>
-                    <Flame size={18} className="text-saffron" />
+                    </span>
+                    <Flame size={18} className="text-marigold" />
                   </div>
-                  <h3 className="font-display text-3xl sm:text-4xl text-gradient-saffron mb-3">
+                  <h3 className="mb-3 font-display text-3xl text-white sm:text-4xl">
                     {uiT(ui.expo.rajsuya, lang)}
                   </h3>
-                  <p className="text-muted font-body font-light mb-6 leading-relaxed">
+                  <p className="mb-7 font-light leading-relaxed text-cream-on-dark/70">
                     {uiT(ui.expo.rajsuyaDesc, lang)}
                   </p>
-                  <div className="flex items-baseline gap-2 mb-6">
-                    <span className="font-display text-4xl text-saffron-ink">
-                      ₹{rajsuyaTicket.price.toLocaleString('en-IN')}
+                  <div className="mb-7 flex items-baseline gap-2">
+                    <span className="font-display text-4xl font-semibold text-marigold">
+                      {formatRupees(rajsuyaPrice.finalPrice)}
                     </span>
-                    <span className="text-muted text-sm font-body">/ {uiT(ui.sundarkand.perHead, lang)}</span>
+                    {rajsuyaPrice.hasDiscount && (
+                      <span className="text-lg text-cream-on-dark/45 line-through">
+                        {formatRupees(rajsuyaPrice.basePrice)}
+                      </span>
+                    )}
+                    <span className="text-sm text-cream-on-dark/55">
+                      / {uiT(ui.sundarkand.perHead, lang)}
+                    </span>
                   </div>
+                  {(rajsuyaPrice.windowStart || rajsuyaPrice.windowEnd) && (
+                    <div className="mb-7 rounded-full bg-white/95 p-1 w-fit">
+                      <CountdownPill start={rajsuyaPrice.windowStart} end={rajsuyaPrice.windowEnd} />
+                    </div>
+                  )}
                   <button
                     onClick={() => onRegister(rajsuyaTicket)}
-                    className="px-7 py-3.5 rounded-full bg-grad-hand text-white font-ui font-semibold shadow-lg shadow-saffron/30 hover:shadow-saffron/50 hover:scale-105 transition-all duration-300 ease-smooth w-fit"
+                    className="btn btn-primary w-fit"
                   >
                     {uiT(ui.expo.rajsuyaRegister, lang)}
                   </button>
@@ -141,47 +160,43 @@ export default function Expo({ onRegister, tickets, tierCards }: ExpoProps) {
         </div>
 
         {visitorTicket && (
-          <motion.div
-            className="max-w-md mx-auto"
-            initial={{ opacity: 0, y: 40 }}
-            whileInView={{ opacity: 1, y: 0 }}
-            viewport={{ once: true }}
-            transition={{ duration: 0.8, ease: [0.22, 1, 0.36, 1] }}
-          >
-            <div className="relative rounded-24 p-8 border border-sky/25 bg-gradient-to-br from-sandal to-sandal-2 shadow-sm">
-              <div className="flex items-center gap-3 mb-4">
-                <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-saffron/20 to-sky/15 flex items-center justify-center">
-                  <Ticket size={24} className="text-saffron-ink" />
-                </div>
-                <div>
-                  <h3 className="font-display text-xl text-ink">{uiT(ui.expo.expoVisitor, lang)}</h3>
-                  <p className="text-xs text-muted font-body">{uiT(ui.sundarkand.perHead, lang)}</p>
-                </div>
-              </div>
-              <p className="text-muted text-sm font-body font-light mb-4 leading-relaxed">
-                {uiT(ui.expo.expoVisitorDesc, lang)}
-              </p>
-              <div className="flex items-baseline gap-2 mb-6">
-                <span className="font-display text-3xl text-saffron-ink">
-                  ₹{visitorTicket.price.toLocaleString('en-IN')}
-                </span>
-              </div>
-              <div className="space-y-2 mb-6">
-                {['27–29 August 2027', 'Pragati Maidan, Delhi', lang === 'en' ? 'All 3 days access' : 'तीनों दिन पहुँच'].map((item) => (
-                  <div key={item} className="flex items-center gap-2 text-muted text-sm font-body">
-                    <Check size={15} className="text-saffron" />
-                    {item}
-                  </div>
-                ))}
-              </div>
-              <button
-                onClick={() => onRegister(visitorTicket)}
-                className="w-full py-3 rounded-full bg-grad-hand text-white font-ui font-semibold hover:shadow-lg hover:shadow-saffron/30 transition-all duration-300 ease-smooth"
-              >
-                {uiT(ui.sundarkand.register, lang)}
-              </button>
+          <div className="mx-auto max-w-md">
+            <div className="section-head mb-10">
+              <MandalaDivider tone="tint" />
+              <span className="eyebrow eyebrow--center mt-6">
+                {lang === 'en' ? 'Entry pass' : 'प्रवेश पास'}
+              </span>
             </div>
-          </motion.div>
+            <TicketCard
+              ticket={visitorTicket}
+              onRegister={onRegister}
+              features={[
+                '27–29 August 2027',
+                'Pragati Maidan, Delhi',
+                lang === 'en' ? 'All 3 days access' : 'तीनों दिन पहुँच',
+                uiT(ui.expo.expoVisitorDesc, lang),
+              ]}
+            />
+            <Link
+              to="/stall"
+              className="mt-5 flex items-center justify-between gap-3 rounded-2xl border border-line bg-white px-5 py-4 transition-colors hover:border-saffron"
+            >
+              <span className="flex items-center gap-3">
+                <span className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-sindoor text-marigold">
+                  <Store size={18} />
+                </span>
+                <span>
+                  <span className="block font-ui text-[0.64rem] uppercase tracking-[0.18em] text-saffron-ink">
+                    {lang === 'en' ? 'For brands & businesses' : 'ब्रांड्स और व्यवसायों के लिए'}
+                  </span>
+                  <span className="mt-0.5 block font-display text-lg leading-tight text-ink">
+                    {lang === 'en' ? 'Exhibiting instead? Book a stall' : 'प्रदर्शक बनना चाहते हैं? स्टॉल बुक करें'}
+                  </span>
+                </span>
+              </span>
+              <ArrowRight size={19} className="shrink-0 text-saffron" />
+            </Link>
+          </div>
         )}
       </div>
     </section>

@@ -54,8 +54,12 @@ export default function TiltCard({ ticket, onRegister }: TiltCardProps) {
       onMouseMove={handleMouseMove}
       onMouseLeave={handleMouseLeave}
       style={{ rotateX, rotateY, transformStyle: 'preserve-3d' }}
-      className="relative w-full max-w-sm mx-auto rounded-24 p-8 border border-sky/25 bg-gradient-to-br from-sandal to-sandal-2 backdrop-blur-md overflow-hidden cursor-pointer shadow-sm"
+      className="card relative mx-auto w-full max-w-sm cursor-pointer overflow-hidden p-8"
     >
+      <div
+        className="pointer-events-none absolute inset-x-0 top-0 h-1.5"
+        style={{ background: 'var(--grad-hand)' }}
+      />
       {/* Moving shine */}
       {!reducedMotion && (
         <div
@@ -67,36 +71,35 @@ export default function TiltCard({ ticket, onRegister }: TiltCardProps) {
       )}
 
       <div style={{ transform: 'translateZ(40px)' }} className="relative">
-        <div className="flex items-center gap-3 mb-6">
-          <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-saffron/20 to-sky/15 flex items-center justify-center">
+        <div className="mb-6 flex items-center gap-3">
+          <div className="grid h-12 w-12 place-items-center rounded-2xl bg-saffron/10">
             <Ticket size={24} className="text-saffron-ink" />
           </div>
           <div>
             <h3 className="font-display text-xl text-ink">{uiT(ticket.label, lang)}</h3>
-            <p className="text-xs text-muted font-body">{uiT(ui.sundarkand.perHead, lang)}</p>
+            <p className="font-ui text-xs uppercase tracking-[0.16em] text-muted">
+              {uiT(ui.sundarkand.perHead, lang)}
+            </p>
           </div>
         </div>
 
-        <div className="flex items-baseline gap-3 mb-6">
+        <div className="mb-6 flex items-baseline gap-3">
           {hasDiscount && (
-            <span className="text-lg text-muted line-through font-body">
+            <span className="text-lg text-muted line-through">
               ₹{ticket.price.toLocaleString('en-IN')}
             </span>
           )}
-          <span className="font-display text-4xl text-saffron-ink">
+          <span className="font-display text-4xl font-semibold text-saffron-ink">
             ₹{finalPrice.toLocaleString('en-IN')}
           </span>
           {hasDiscount && (
-            <span className="px-2 py-0.5 rounded-full bg-saffron/15 text-saffron-ink text-xs font-ui font-semibold">
+            <span className="chip chip--lotus">
               {ticket.discount_percent}% {lang === 'en' ? 'off' : 'छूट'}
             </span>
           )}
         </div>
 
-        <button
-          onClick={() => onRegister(ticket)}
-          className="w-full py-3 rounded-full bg-grad-hand text-white font-ui font-semibold hover:shadow-lg hover:shadow-saffron/30 transition-all duration-300 ease-smooth"
-        >
+        <button onClick={() => onRegister(ticket)} className="btn btn-primary btn-block">
           {uiT(ui.sundarkand.register, lang)}
         </button>
       </div>

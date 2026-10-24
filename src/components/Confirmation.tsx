@@ -1,10 +1,10 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { motion } from 'framer-motion';
-import { Download, CheckCircle, Calendar, MapPin, Users, Sparkles } from 'lucide-react';
+import { CheckCircle2 } from 'lucide-react';
 import type { BookingResult } from '@/lib/booking';
 import { generateTicketPDF } from '@/lib/ticketPdf';
 import { useApp } from '@/context/AppContext';
-import { ui } from '@/i18n';
+import TicketPass from '@/components/TicketPass';
 
 interface ConfirmationProps {
   booking: BookingResult;
@@ -29,11 +29,6 @@ export default function Confirmation({
   const [downloading, setDownloading] = useState(false);
   const [burst, setBurst] = useState(true);
 
-  useEffect(() => {
-    const t = setTimeout(() => setBurst(false), 2000);
-    return () => clearTimeout(t);
-  }, []);
-
   const handleDownload = async () => {
     setDownloading(true);
     try {
@@ -55,98 +50,81 @@ export default function Confirmation({
 
   return (
     <motion.div
-      className="fixed inset-0 z-[80] flex items-center justify-center p-4"
+      className="fixed inset-0 z-[80] flex items-center justify-center overflow-y-auto p-4"
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
     >
-      <div className="absolute inset-0 bg-navy-900/90 backdrop-blur-md" onClick={onClose} />
+      <div className="absolute inset-0 bg-sindoor-deep/80 backdrop-blur-sm" onClick={onClose} />
 
-      {/* Golden burst */}
+      {/* Marigold burst on arrival */}
       {burst && (
-        <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-none">
-          {[...Array(12)].map((_, i) => (
+        <div className="pointer-events-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2">
+          {[...Array(14)].map((_, i) => (
             <motion.div
               key={i}
-              className="absolute w-2 h-2 rounded-full bg-gold"
+              className="absolute h-2 w-2 rounded-full"
+              style={{ background: i % 2 ? '#FFD21F' : '#EE2C8F' }}
               initial={{ x: 0, y: 0, opacity: 1, scale: 1 }}
               animate={{
-                x: Math.cos((i / 12) * Math.PI * 2) * 200,
-                y: Math.sin((i / 12) * Math.PI * 2) * 200,
+                x: Math.cos((i / 14) * Math.PI * 2) * 230,
+                y: Math.sin((i / 14) * Math.PI * 2) * 230,
                 opacity: 0,
                 scale: 0,
               }}
-              transition={{ duration: 1.5, ease: 'easeOut' }}
+              transition={{ duration: 1.4, ease: 'easeOut' }}
+              onAnimationComplete={() => {
+                if (i === 13) setBurst(false);
+              }}
             />
           ))}
         </div>
       )}
 
       <motion.div
-        className="relative w-full max-w-md glass rounded-3xl border border-gold/30 p-8 text-center"
-        initial={{ scale: 0.8, opacity: 0 }}
-        animate={{ scale: 1, opacity: 1 }}
+        className="relative my-auto w-full max-w-lg"
+        initial={{ scale: 0.86, opacity: 0, y: 24 }}
+        animate={{ scale: 1, opacity: 1, y: 0 }}
+        exit={{ scale: 0.86, opacity: 0, y: 24 }}
         transition={{ duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
       >
-        <motion.div
-          className="mx-auto w-20 h-20 rounded-full bg-gradient-to-br from-green-500/30 to-green-600/20 flex items-center justify-center mb-6"
-          initial={{ scale: 0 }}
-          animate={{ scale: 1 }}
-          transition={{ delay: 0.3, type: 'spring', stiffness: 200 }}
-        >
-          <CheckCircle size={40} className="text-green-400" />
-        </motion.div>
-
-        <h3 className="font-devanagari text-2xl text-gradient-gold mb-2">
-          {lang === 'en' ? 'Registration confirmed!' : 'रजिस्ट्रेशन सफल!'}
-        </h3>
-        <p className="text-ivory/60 text-sm font-mukta mb-6">
-          {lang === 'en'
-            ? 'Your booking has been confirmed. Download your ticket below.'
-            : 'आपकी बुकिंग कन्फर्म हो गई है। नीचे अपना टिकट डाउनलोड करें।'}
-        </p>
-
-        <div className="glass rounded-2xl p-5 mb-6 text-left space-y-3">
-          <div className="flex items-center justify-between">
-            <span className="text-ivory/50 text-sm font-mukta">{lang === 'en' ? 'Booking ID' : 'बुकिंग आईडी'}</span>
-            <span className="text-gold-light font-mukta font-semibold">{booking.booking_code}</span>
-          </div>
-          <div className="flex items-center gap-2 text-ivory/70 text-sm font-mukta">
-            <Calendar size={15} className="text-saffron" /> {event.name}
-          </div>
-          <div className="flex items-center gap-2 text-ivory/70 text-sm font-mukta">
-            <Sparkles size={15} className="text-saffron" /> {ticket.label}
-          </div>
-          {city && (
-            <div className="flex items-center gap-2 text-ivory/70 text-sm font-mukta">
-              <MapPin size={15} className="text-saffron" /> {city.city}, {city.state}
-            </div>
-          )}
-          <div className="flex items-center gap-2 text-ivory/70 text-sm font-mukta">
-            <Users size={15} className="text-saffron" /> {persons} {lang === 'en' ? 'persons' : 'व्यक्ति'}
-          </div>
-          <div className="flex items-center justify-between pt-2 border-t border-gold/10">
-            <span className="text-ivory/50 text-sm font-mukta">{lang === 'en' ? 'Amount paid' : 'राशि चुकी'}</span>
-            <span className="font-devanagari text-xl text-gradient-gold">
-              ₹{booking.amount.toLocaleString('en-IN')}
-            </span>
-          </div>
+        <div className="mb-5 text-center">
+          <motion.span
+            className="mx-auto mb-3 grid h-14 w-14 place-items-center rounded-full bg-success/15"
+            initial={{ scale: 0 }}
+            animate={{ scale: 1 }}
+            transition={{ delay: 0.25, type: 'spring', stiffness: 220 }}
+          >
+            <CheckCircle2 size={30} className="text-success" />
+          </motion.span>
+          <h3 className="font-display text-3xl text-white">
+            {lang === 'en' ? 'Registration confirmed' : 'रजिस्ट्रेशन सफल'}
+          </h3>
+          <p className="mt-1 text-sm text-cream-on-dark/70">
+            {lang === 'en'
+              ? 'Carry this pass — the QR is verified against our database at the gate.'
+              : 'यह पास साथ रखें — द्वार पर आपका QR डेटाबेस से मेल खाता है।'}
+          </p>
         </div>
 
-        <button
-          onClick={handleDownload}
-          disabled={downloading}
-          className="w-full py-3.5 rounded-xl bg-gradient-to-r from-saffron to-saffron-dark text-ivory font-mukta font-semibold flex items-center justify-center gap-2 hover:shadow-lg hover:shadow-saffron/30 transition-all duration-300 ease-smooth disabled:opacity-50"
-        >
-          <Download size={18} />
-          {downloading
-            ? (lang === 'en' ? 'Generating...' : 'बना रहे हैं...')
-            : (lang === 'en' ? 'Download ticket (PDF)' : 'टिकट डाउनलोड करें (PDF)')}
-        </button>
+        <TicketPass
+          bookingCode={booking.booking_code}
+          holderName={name}
+          event={event.name}
+          ticket={ticket.label}
+          city={city ? `${city.city}, ${city.state}` : undefined}
+          persons={persons}
+          amount={booking.amount}
+          date={event.date}
+          venue={event.venue}
+          status="paid"
+          onDownload={handleDownload}
+          downloading={downloading}
+        />
 
         <button
           onClick={onClose}
-          className="mt-3 w-full py-2.5 text-ivory/50 text-sm font-mukta hover:text-ivory transition-colors"
+          className="btn btn-ghost btn-block mt-4 !bg-white/95"
         >
           {lang === 'en' ? 'Close' : 'बंद करें'}
         </button>
