@@ -1,0 +1,13 @@
+{
+  "projectId": "72332654",
+  "functions": {
+    "create-booking": {
+      "hasChanged": false,
+      "hash": "9a741debdadf1dbf0831b38a45cac2d46617e95769ba597d77e194e76bbf234e"
+    },
+    "verify-payment": {
+      "hasChanged": false,
+      "hash": "787ad4948334a48a342dede080f2dc4f36a5a22d3482034b33dc5bf172776b78"
+    }
+  }
+}
