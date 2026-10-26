@@ -195,17 +195,28 @@ export interface AdminSchedule {
 export interface AdminBooking {
   id: number;
   reference: string;
+  event_id: number;
+  schedule_id: number;
   name: string;
   email: string;
   phone: string;
   qty: number;
+  pass_days: number;
   unit_price: number;
   amount: number;
   status: 'pending' | 'paid' | 'cancelled' | 'refunded';
+  source: 'online' | 'admin_free' | 'admin_issued';
+  guest_category: 'visitor' | 'vip' | 'press' | 'organiser' | 'staff' | 'other';
+  coupon_code: string | null;
+  discount_amount: number;
+  gross_amount: number | null;
+  admin_note: string | null;
   otp_verified_at: string | null;
   pass_sent_at: string | null;
   check_in_at: string | null;
   created_at: string;
+  attendee_names: string | null;
+  attendees?: { position: number; name: string; phone: string; email: string | null }[];
   event_en: string;
   event_hi: string;
   kind: string;
@@ -223,6 +234,122 @@ export interface AdminBooking {
   address_hi: string;
   checked_in_by_name: string | null;
 }
+
+export interface IssueBookingInput {
+  scheduleId: number;
+  ticketTypeId: number;
+  name: string;
+  email: string;
+  phone: string;
+  qty: number;
+  guestCategory: AdminBooking['guest_category'];
+  note?: string;
+  attendees?: { name: string; phone: string; email?: string }[];
+}
+
+export const adminIssueBooking = (input: IssueBookingInput) =>
+  request<{ pass: { reference: string; amount: number; qty: number; attendees: { name: string; email: string | null }[] } }>(
+    '/bookings/issue',
+    { method: 'POST', body: JSON.stringify(input) },
+  );
+
+export const adminUpdateBooking = (
+  id: number,
+  input: {
+    guestCategory?: AdminBooking['guest_category'];
+    adminNote?: string | null;
+    discountAmount?: number;
+    attendees?: { name: string; phone: string; email?: string }[];
+  },
+) => request<{ pass: unknown }>(`/bookings/${id}`, { method: 'PATCH', body: JSON.stringify(input) });
+
+export interface EntryBlock {
+  id: number;
+  booking_id: number | null;
+  email: string | null;
+  phone: string | null;
+  name: string | null;
+  reason: string;
+  scope: 'all_events' | 'event';
+  event_id: number | null;
+  active: number;
+  created_at: string;
+  blocked_by: number | null;
+  blocked_by_name: string | null;
+  event_name_en: string | null;
+}
+
+export const adminEntryBlocks = (includeRevoked = false) =>
+  request<{ blocks: EntryBlock[] }>(`/entry-blocks${includeRevoked ? '?include_revoked=1' : ''}`);
+
+export const adminCreateEntryBlock = (input: {
+  reference?: string;
+  email?: string;
+  phone?: string;
+  name?: string;
+  reason: string;
+  scope: 'all_events' | 'event';
+  eventId?: number | null;
+}) => request<{ block: EntryBlock }>('/entry-blocks', { method: 'POST', body: JSON.stringify(input) });
+
+export const adminSetEntryBlock = (id: number, active: boolean) =>
+  request<{ block: EntryBlock }>(`/entry-blocks/${id}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ active }),
+  });
+
+/* Coupons */
+export interface AdminCoupon {
+  id: number;
+  code: string;
+  kind: 'percent' | 'flat';
+  value: number;
+  event_id: number | null;
+  ticket_type_id: number | null;
+  min_qty: number;
+  max_uses: number | null;
+  per_email_limit: number;
+  valid_from: string | null;
+  valid_until: string | null;
+  label_en: string | null;
+  label_hi: string | null;
+  active: number;
+  created_by: number | null;
+  created_at: string;
+  updated_at: string | null;
+  event_en: string | null;
+  event_hi: string | null;
+  ticket_en: string | null;
+  ticket_hi: string | null;
+  used: number;
+}
+
+export interface CouponInput {
+  code: string;
+  kind: 'percent' | 'flat';
+  value: number;
+  eventId?: number | null;
+  ticketTypeId?: number | null;
+  minQty: number;
+  maxUses?: number | null;
+  perEmailLimit: number;
+  validFrom?: string | null;
+  validUntil?: string | null;
+  labelEn?: string;
+  labelHi?: string;
+  active: boolean;
+}
+
+export const adminCoupons = () => request<{ coupons: AdminCoupon[] }>('/coupons');
+
+export const adminCreateCoupon = (input: CouponInput) =>
+  request<{ id: number }>('/coupons', { method: 'POST', body: JSON.stringify(input) });
+
+export const adminUpdateCoupon = (id: number, input: CouponInput) =>
+  request<{ ok: boolean }>(`/coupons/${id}`, { method: 'PUT', body: JSON.stringify(input) });
+
+export const adminDeleteCoupon = (id: number) =>
+  request<{ ok: boolean; retired: boolean }>(`/coupons/${id}`, { method: 'DELETE' });
 
 export interface BookingSummary {
   totals: {
@@ -272,6 +399,20 @@ export interface AdminPayment {
   name: string;
 }
 
+export type StaffKycStatus = 'pending' | 'otp_pending' | 'docs_uploaded' | 'verified' | 'rejected';
+export type StaffKycDocType = 'aadhaar' | 'pan' | 'voter_id' | 'driving_licence' | 'other';
+export type StaffKycFileKind = 'aadhaar' | 'pan' | 'other';
+
+export interface StaffKycSummary {
+  status: StaffKycStatus;
+  mobile: string | null;
+  docType: StaffKycDocType;
+  idMasked: string | null;
+  hasDocs: boolean;
+  emailVerifiedAt: string | null;
+  verifiedAt: string | null;
+}
+
 export interface AdminStaff {
   id: number;
   email: string;
@@ -281,7 +422,80 @@ export interface AdminStaff {
   last_login_at: string | null;
   created_at: string;
   checkins: number;
+  kyc?: StaffKycSummary;
 }
+
+export interface StaffKyc {
+  adminId: number;
+  email: string;
+  name: string;
+  active: number;
+  mobile: string | null;
+  mobileVerifiedAt: string | null;
+  emailVerifiedAt: string | null;
+  docType: StaffKycDocType;
+  aadhaarMasked: string | null;
+  panMasked: string | null;
+  otherDocNo: string | null;
+  aadhaarNumber?: string | null;
+  panNumber?: string | null;
+  status: StaffKycStatus;
+  notes: string | null;
+  verifiedAt: string | null;
+  verifiedByName: string | null;
+  files: { aadhaar: boolean; pan: boolean; other: boolean };
+  updatedAt: string | null;
+}
+
+export interface StaffKycInput {
+  mobile?: string | null;
+  docType?: StaffKycDocType;
+  aadhaarNumber?: string | null;
+  panNumber?: string | null;
+  otherDocNo?: string | null;
+  notes?: string | null;
+}
+
+export const adminStaffKyc = (id: number, reveal = false) =>
+  request<{ kyc: StaffKyc }>(`/staff/${id}/kyc${reveal ? '?reveal=1' : ''}`);
+
+export const adminSaveStaffKyc = (id: number, input: StaffKycInput) =>
+  request<{ kyc: StaffKyc }>(`/staff/${id}/kyc`, { method: 'PUT', body: JSON.stringify(input) });
+
+export const adminSetStaffKycStatus = (
+  id: number,
+  status: 'verified' | 'rejected' | 'pending',
+  notes?: string,
+) =>
+  request<{ kyc: StaffKyc }>(`/staff/${id}/kyc/status`, {
+    method: 'PATCH',
+    body: JSON.stringify({ status, notes }),
+  });
+
+export const adminUploadStaffKycFile = (
+  id: number,
+  kind: StaffKycFileKind,
+  file: { mime: string; data: string },
+) =>
+  request<{ ok: boolean; kyc: StaffKyc }>(`/staff/${id}/kyc/file/${kind}`, {
+    method: 'POST',
+    body: JSON.stringify(file),
+  });
+
+export const staffKycFileUrl = (id: number, kind: StaffKycFileKind) =>
+  `/api/admin/staff/${id}/kyc/file/${kind}`;
+
+export const adminSendStaffKycOtp = (id: number) =>
+  request<{ ok: boolean; delivered: boolean }>(`/staff/${id}/kyc/otp`, { method: 'POST' });
+
+export const adminVerifyStaffKycOtp = (id: number, code: string) =>
+  request<{ ok: boolean; kyc: StaffKyc }>(`/staff/${id}/kyc/otp/verify`, {
+    method: 'POST',
+    body: JSON.stringify({ code }),
+  });
+
+export const adminDeleteStaff = (id: number) =>
+  request<{ ok: boolean; purged: boolean }>(`/staff/${id}?purge=1`, { method: 'DELETE' });
 
 export interface CheckInResult {
   allowed: boolean;

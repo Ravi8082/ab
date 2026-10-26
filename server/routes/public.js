@@ -252,6 +252,15 @@ publicRouter.get(
   }),
 );
 
+publicRouter.get(
+  '/events/cookie-banner',
+  asyncHandler(async (_req, res) => {
+    const rows = await query("SELECT value_json FROM event_content WHERE content_key = 'cookie_banner'");
+    res.set('Cache-Control', 'public, max-age=60, stale-while-revalidate=300');
+    res.json({ banner: rows[0]?.value_json ?? null });
+  }),
+);
+
 const LEGAL_PAGES = {
   terms: 'legal_terms',
   privacy: 'legal_privacy',

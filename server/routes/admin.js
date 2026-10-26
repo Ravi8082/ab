@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import rateLimit from 'express-rate-limit';
 import bcrypt from 'bcryptjs';
+import { randomInt } from 'node:crypto';
 import { z } from 'zod';
 import { query, withTransaction } from '../db.js';
 import { HttpError, asyncHandler, makeReference } from '../lib/util.js';
@@ -36,6 +37,15 @@ import { activateBooking, loadBookingById, publicPass } from '../lib/eventBookin
 import { normalizeCode } from '../lib/offers.js';
 import { replaceAttendees } from '../lib/attendees.js';
 import { createBlock, listBlocks, setBlockActive } from '../lib/entryBlocks.js';
+import { sendStaffKycOtpEmail } from '../lib/mailer.js';
+import {
+  KYC_FILE_COLUMNS,
+  maskIdNumber,
+  removeKycDir,
+  removeKycFile,
+  resolveKycFile,
+  saveKycFile,
+} from '../lib/staffKyc.js';
 
 export const adminRouter = Router();
 
@@ -1101,10 +1111,24 @@ adminRouter.get(
   asyncHandler(async (req, res) => {
     const filters = parseBookingFilters(req.query);
     const limit = Math.min(1000, Math.max(1, Number(req.query.limit || 300)));
-    const [bookings, summary] = await Promise.all([
+    const [rows, summary] = await Promise.all([
       fetchAdminBookings(filters, limit),
       bookingSummary(filters),
     ]);
+    const bookings = rows.map((row) => {
+      let attendees = [];
+      if (Array.isArray(row.attendees_json)) {
+        attendees = row.attendees_json;
+      } else if (row.attendees_json) {
+        try {
+          const parsed = JSON.parse(String(row.attendees_json));
+          if (Array.isArray(parsed)) attendees = parsed;
+        } catch {
+          attendees = [];
+        }
+      }
+      return { ...row, attendees };
+    });
     res.json({ bookings, summary });
   }),
 );
@@ -1238,15 +1262,79 @@ adminRouter.delete(
 
 /* -------------------------------- Staff -------------------------------- */
 
+const KYC_SELECT = `a.id, a.email, a.name, a.role, a.active, a.last_login_at, a.created_at,
+       k.mobile, k.mobile_verified_at, k.email_verified_at, k.doc_type,
+       k.aadhaar_number, k.pan_number, k.other_doc_no,
+       k.aadhaar_photo, k.pan_photo, k.other_doc_photo,
+       k.status AS kyc_status, k.notes AS kyc_notes, k.verified_at AS kyc_verified_at,
+       k.updated_at AS kyc_updated_at, v.name AS verified_by_name`;
+
+const KYC_FROM = `FROM admins a
+       LEFT JOIN staff_kyc k ON k.admin_id = a.id
+       LEFT JOIN admins v ON v.id = k.verified_by`;
+
+function kycPayload(row, { reveal = false } = {}) {
+  return {
+    adminId: row.id,
+    email: row.email,
+    name: row.name,
+    active: Number(row.active),
+    mobile: row.mobile ?? null,
+    mobileVerifiedAt: row.mobile_verified_at ?? null,
+    emailVerifiedAt: row.email_verified_at ?? null,
+    docType: row.doc_type ?? 'aadhaar',
+    aadhaarMasked: maskIdNumber(row.aadhaar_number),
+    panMasked: maskIdNumber(row.pan_number),
+    otherDocNo: row.other_doc_no ?? null,
+    status: row.kyc_status ?? 'pending',
+    notes: row.kyc_notes ?? null,
+    verifiedAt: row.kyc_verified_at ?? null,
+    verifiedByName: row.verified_by_name ?? null,
+    files: {
+      aadhaar: Boolean(row.aadhaar_photo),
+      pan: Boolean(row.pan_photo),
+      other: Boolean(row.other_doc_photo),
+    },
+    updatedAt: row.kyc_updated_at ?? null,
+    ...(reveal ? { aadhaarNumber: row.aadhaar_number ?? null, panNumber: row.pan_number ?? null } : {}),
+  };
+}
+
+async function loadStaffKyc(id) {
+  const rows = await query(`${`SELECT ${KYC_SELECT} ${KYC_FROM}`} WHERE a.id = ? AND a.role = 'staff' LIMIT 1`, [id]);
+  return rows[0] ?? null;
+}
+
 adminRouter.get(
   '/staff',
   asyncHandler(async (_req, res) => {
     const rows = await query(
-      `SELECT a.id, a.email, a.name, a.role, a.active, a.last_login_at, a.created_at,
+      `SELECT ${KYC_SELECT},
               (SELECT COUNT(*) FROM event_booking_checkins ci WHERE ci.checked_in_by = a.id) AS checkins
-       FROM admins a WHERE a.role = 'staff' ORDER BY a.id DESC`,
+       ${KYC_FROM}
+       WHERE a.role = 'staff' ORDER BY a.id DESC`,
     );
-    res.json({ staff: rows.map((row) => ({ ...row, checkins: Number(row.checkins) })) });
+    res.json({
+      staff: rows.map((row) => ({
+        id: row.id,
+        email: row.email,
+        name: row.name,
+        role: row.role,
+        active: row.active,
+        last_login_at: row.last_login_at,
+        created_at: row.created_at,
+        checkins: Number(row.checkins),
+        kyc: {
+          status: row.kyc_status ?? 'pending',
+          mobile: row.mobile ?? null,
+          docType: row.doc_type ?? 'aadhaar',
+          idMasked: maskIdNumber(row.aadhaar_number || row.pan_number || row.other_doc_no),
+          hasDocs: Boolean(row.aadhaar_photo || row.pan_photo || row.other_doc_photo),
+          emailVerifiedAt: row.email_verified_at ?? null,
+          verifiedAt: row.kyc_verified_at ?? null,
+        },
+      })),
+    });
   }),
 );
 
@@ -1344,17 +1432,430 @@ adminRouter.post(
 adminRouter.delete(
   '/staff/:id',
   asyncHandler(async (req, res) => {
-    const result = await query(`UPDATE admins SET active = 0 WHERE id = ? AND role = 'staff'`, [req.params.id]);
-    if (result.affectedRows === 0) throw new HttpError(404, 'Staff account not found.');
+    const [staff] = await query(
+      `SELECT id, email, name FROM admins WHERE id = ? AND role = 'staff' LIMIT 1`,
+      [req.params.id],
+    );
+    if (!staff) throw new HttpError(404, 'Staff account not found.');
+
+    if (req.query.purge === '1') {
+      const [usage] = await query(
+        'SELECT COUNT(*) AS n FROM event_booking_checkins WHERE checked_in_by = ?',
+        [staff.id],
+      );
+      if (Number(usage.n) > 0) {
+        throw new HttpError(
+          409,
+          'This account has gate check-ins. Disable it instead so the check-in history keeps its staff name.',
+        );
+      }
+      await query(`DELETE FROM admins WHERE id = ? AND role = 'staff'`, [staff.id]);
+      await removeKycDir(staff.id);
+      await audit({
+        actorType: 'admin',
+        actorId: req.admin.id,
+        action: 'staff.purged',
+        entity: 'admin',
+        entityId: String(staff.id),
+        meta: { email: staff.email, name: staff.name },
+        ip: clientIp(req),
+      });
+      return res.json({ ok: true, purged: true });
+    }
+
+    await query(`UPDATE admins SET active = 0 WHERE id = ? AND role = 'staff'`, [staff.id]);
     await audit({
       actorType: 'admin',
       actorId: req.admin.id,
       action: 'staff.disabled',
       entity: 'admin',
-      entityId: String(req.params.id),
+      entityId: String(staff.id),
+      meta: { email: staff.email },
       ip: clientIp(req),
     });
-    res.json({ ok: true });
+    res.json({ ok: true, purged: false });
+  }),
+);
+
+/* ------------------------------ Staff KYC ------------------------------ */
+
+const kycOtpLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  limit: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many verification codes requested. Wait a few minutes and try again.' },
+});
+
+const optionalIdNumber = (regex, message) =>
+  z
+    .union([z.string().trim().regex(regex, message), z.literal(''), z.null()])
+    .optional();
+
+const staffKycSchema = z.object({
+  mobile: optionalIdNumber(/^[6-9]\d{9}$/, 'Enter a valid 10-digit Indian mobile number'),
+  docType: z.enum(['aadhaar', 'pan', 'voter_id', 'driving_licence', 'other']).optional(),
+  aadhaarNumber: optionalIdNumber(/^\d{12}$/, 'An Aadhaar number has 12 digits'),
+  panNumber: optionalIdNumber(/^[A-Za-z]{5}\d{4}[A-Za-z]$/, 'A PAN is 10 characters like ABCDE1234F'),
+  otherDocNo: z.union([z.string().trim().max(60), z.literal(''), z.null()]).optional(),
+  notes: z.union([z.string().trim().max(255), z.literal(''), z.null()]).optional(),
+});
+
+const kycStatusSchema = z.object({
+  status: z.enum(['verified', 'rejected', 'pending']),
+  notes: z.union([z.string().trim().max(255), z.literal(''), z.null()]).optional(),
+});
+
+const kycOtpSchema = z.object({ code: z.string().trim().regex(/^\d{6}$/, 'Enter the 6-digit code') });
+
+const DOC_LABELS = {
+  aadhaar: 'Aadhaar',
+  pan: 'PAN',
+  voter_id: 'Voter ID',
+  driving_licence: 'Driving licence',
+  other: 'identity document',
+};
+
+function requiredDocFor(docType) {
+  if (docType === 'aadhaar') return { number: 'aadhaar_number', photo: 'aadhaar_photo', label: 'Aadhaar' };
+  if (docType === 'pan') return { number: 'pan_number', photo: 'pan_photo', label: 'PAN' };
+  return { number: 'other_doc_no', photo: 'other_doc_photo', label: DOC_LABELS[docType] ?? 'identity document' };
+}
+
+adminRouter.get(
+  '/staff/:id/kyc',
+  asyncHandler(async (req, res) => {
+    const row = await loadStaffKyc(req.params.id);
+    if (!row) throw new HttpError(404, 'Staff account not found.');
+    const reveal = req.query.reveal === '1';
+    if (reveal) {
+      await audit({
+        actorType: 'admin',
+        actorId: req.admin.id,
+        action: 'staff.kyc.revealed',
+        entity: 'admin',
+        entityId: String(row.id),
+        meta: { email: row.email },
+        ip: clientIp(req),
+      });
+    }
+    res.json({ kyc: kycPayload(row, { reveal }) });
+  }),
+);
+
+adminRouter.put(
+  '/staff/:id/kyc',
+  asyncHandler(async (req, res) => {
+    const parsed = staffKycSchema.safeParse(req.body);
+    if (!parsed.success) {
+      throw new HttpError(400, 'Please check the KYC details.', parsed.error.flatten().fieldErrors);
+    }
+    const staff = await loadStaffKyc(req.params.id);
+    if (!staff) throw new HttpError(404, 'Staff account not found.');
+
+    const data = parsed.data;
+    const normalized = (value) => (value === undefined ? undefined : value === '' ? null : value);
+    const next = {
+      mobile: normalized(data.mobile) === undefined ? staff.mobile ?? null : normalized(data.mobile),
+      docType: data.docType ?? staff.doc_type ?? 'aadhaar',
+      aadhaarNumber:
+        normalized(data.aadhaarNumber) === undefined
+          ? staff.aadhaar_number ?? null
+          : normalized(data.aadhaarNumber),
+      panNumber:
+        normalized(data.panNumber) === undefined
+          ? staff.pan_number ?? null
+          : normalized(data.panNumber)?.toUpperCase() ?? null,
+      otherDocNo:
+        normalized(data.otherDocNo) === undefined ? staff.other_doc_no ?? null : normalized(data.otherDocNo),
+      notes: normalized(data.notes) === undefined ? staff.kyc_notes ?? null : normalized(data.notes),
+    };
+
+    const identityChanged =
+      next.docType !== (staff.doc_type ?? 'aadhaar') ||
+      next.aadhaarNumber !== (staff.aadhaar_number ?? null) ||
+      next.panNumber !== (staff.pan_number ?? null) ||
+      next.otherDocNo !== (staff.other_doc_no ?? null);
+
+    const currentStatus = staff.kyc_status ?? 'pending';
+    const hasAnyDoc = Boolean(next.aadhaarNumber || next.panNumber || next.otherDocNo);
+    let status = currentStatus;
+    if (identityChanged && (currentStatus === 'verified' || currentStatus === 'rejected')) {
+      status = hasAnyDoc ? 'docs_uploaded' : 'pending';
+    } else if (currentStatus !== 'verified' && currentStatus !== 'rejected') {
+      status = hasAnyDoc ? 'docs_uploaded' : 'pending';
+    }
+
+    await query(
+      `INSERT INTO staff_kyc (admin_id, mobile, doc_type, aadhaar_number, pan_number, other_doc_no, notes, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE mobile = VALUES(mobile), doc_type = VALUES(doc_type),
+         aadhaar_number = VALUES(aadhaar_number), pan_number = VALUES(pan_number),
+         other_doc_no = VALUES(other_doc_no), notes = VALUES(notes), status = VALUES(status)`,
+      [
+        staff.id,
+        next.mobile,
+        next.docType,
+        next.aadhaarNumber,
+        next.panNumber,
+        next.otherDocNo,
+        next.notes,
+        status,
+      ],
+    );
+
+    await audit({
+      actorType: 'admin',
+      actorId: req.admin.id,
+      action: 'staff.kyc.updated',
+      entity: 'admin',
+      entityId: String(staff.id),
+      meta: {
+        email: staff.email,
+        docType: next.docType,
+        status,
+        identityChanged,
+        hasMobile: Boolean(next.mobile),
+      },
+      ip: clientIp(req),
+    });
+
+    const fresh = await loadStaffKyc(staff.id);
+    res.json({ kyc: kycPayload(fresh) });
+  }),
+);
+
+adminRouter.post(
+  '/staff/:id/kyc/file/:kind',
+  asyncHandler(async (req, res) => {
+    const kind = String(req.params.kind);
+    const column = KYC_FILE_COLUMNS[kind];
+    if (!column) throw new HttpError(404, 'Unknown document type.');
+
+    const [staff] = await query(
+      `SELECT id, email, name FROM admins WHERE id = ? AND role = 'staff' LIMIT 1`,
+      [req.params.id],
+    );
+    if (!staff) throw new HttpError(404, 'Staff account not found.');
+
+    const [existing] = await query(
+      `SELECT ${column} AS path FROM staff_kyc WHERE admin_id = ? LIMIT 1`,
+      [staff.id],
+    );
+    const storedPath = await saveKycFile(staff.id, kind, req.body);
+
+    await query(
+      `INSERT INTO staff_kyc (admin_id, ${column}, status) VALUES (?, ?, 'docs_uploaded')
+       ON DUPLICATE KEY UPDATE ${column} = VALUES(${column}),
+         status = IF(status IN ('pending','otp_pending','rejected'), 'docs_uploaded', status)`,
+      [staff.id, storedPath],
+    );
+    if (existing?.path) await removeKycFile(existing.path);
+
+    await audit({
+      actorType: 'admin',
+      actorId: req.admin.id,
+      action: 'staff.kyc.document_uploaded',
+      entity: 'admin',
+      entityId: String(staff.id),
+      meta: { email: staff.email, kind },
+      ip: clientIp(req),
+    });
+
+    const fresh = await loadStaffKyc(staff.id);
+    res.status(201).json({ ok: true, kyc: kycPayload(fresh) });
+  }),
+);
+
+adminRouter.get(
+  '/staff/:id/kyc/file/:kind',
+  asyncHandler(async (req, res) => {
+    const kind = String(req.params.kind);
+    const column = KYC_FILE_COLUMNS[kind];
+    if (!column) throw new HttpError(404, 'Unknown document type.');
+
+    const [row] = await query(
+      `SELECT k.${column} AS path, a.email FROM staff_kyc k
+       JOIN admins a ON a.id = k.admin_id
+       WHERE k.admin_id = ? AND a.role = 'staff' LIMIT 1`,
+      [req.params.id],
+    );
+    const absolute = resolveKycFile(row?.path);
+    if (!absolute) throw new HttpError(404, 'No document uploaded for this type.');
+
+    await audit({
+      actorType: 'admin',
+      actorId: req.admin.id,
+      action: 'staff.kyc.document_viewed',
+      entity: 'admin',
+      entityId: String(req.params.id),
+      meta: { email: row.email, kind },
+      ip: clientIp(req),
+    });
+
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.sendFile(absolute);
+  }),
+);
+
+adminRouter.patch(
+  '/staff/:id/kyc/status',
+  asyncHandler(async (req, res) => {
+    const parsed = kycStatusSchema.safeParse(req.body);
+    if (!parsed.success) throw new HttpError(400, 'Choose a valid KYC status.');
+    const { status } = parsed.data;
+    const notes = parsed.data.notes === undefined ? undefined : parsed.data.notes || null;
+
+    const [row] = await query('SELECT * FROM staff_kyc WHERE admin_id = ? LIMIT 1', [req.params.id]);
+    if (!row) throw new HttpError(404, 'Save the staff identity details first.');
+
+    if (status === 'verified') {
+      const doc = requiredDocFor(row.doc_type ?? 'aadhaar');
+      if (!row[doc.number]) {
+        throw new HttpError(400, `Add the ${doc.label} number before marking KYC verified.`);
+      }
+      if (!row[doc.photo]) {
+        throw new HttpError(400, `Upload a scan of the ${doc.label} before marking KYC verified.`);
+      }
+    }
+    if (status === 'rejected' && (!notes || notes.trim().length < 3)) {
+      throw new HttpError(400, 'Add a short reason for rejecting the KYC.');
+    }
+
+    await query(
+      `UPDATE staff_kyc SET status = ?, notes = COALESCE(?, notes),
+              verified_by = ?, verified_at = ?
+       WHERE admin_id = ?`,
+      [status, notes ?? null, status === 'verified' ? req.admin.id : null, status === 'verified' ? new Date() : null, row.admin_id],
+    );
+
+    await audit({
+      actorType: 'admin',
+      actorId: req.admin.id,
+      action: status === 'verified' ? 'staff.kyc.verified' : status === 'rejected' ? 'staff.kyc.rejected' : 'staff.kyc.reopened',
+      entity: 'admin',
+      entityId: String(row.admin_id),
+      meta: { notes: notes ?? null },
+      ip: clientIp(req),
+    });
+
+    const fresh = await loadStaffKyc(row.admin_id);
+    res.json({ kyc: kycPayload(fresh) });
+  }),
+);
+
+adminRouter.post(
+  '/staff/:id/kyc/otp',
+  kycOtpLimiter,
+  asyncHandler(async (req, res) => {
+    const [staff] = await query(
+      `SELECT id, email, name, active FROM admins WHERE id = ? AND role = 'staff' LIMIT 1`,
+      [req.params.id],
+    );
+    if (!staff) throw new HttpError(404, 'Staff account not found.');
+    if (!Number(staff.active)) throw new HttpError(409, 'Enable the account before verifying its email.');
+
+    const [recent] = await query(
+      `SELECT COUNT(*) AS n FROM staff_kyc_otps
+       WHERE admin_id = ? AND purpose = 'email' AND created_at > NOW() - INTERVAL 10 MINUTE`,
+      [staff.id],
+    );
+    if (Number(recent.n) >= 3) {
+      throw new HttpError(429, 'Three codes were already sent in the last 10 minutes. Wait before requesting another.');
+    }
+
+    const code = String(randomInt(100000, 1000000));
+    const codeHash = await bcrypt.hash(code, 10);
+    await query(
+      `UPDATE staff_kyc_otps SET consumed_at = NOW()
+       WHERE admin_id = ? AND purpose = 'email' AND consumed_at IS NULL`,
+      [staff.id],
+    );
+    await query(
+      `INSERT INTO staff_kyc_otps (admin_id, purpose, code_hash, expires_at)
+       VALUES (?, 'email', ?, NOW() + INTERVAL 10 MINUTE)`,
+      [staff.id, codeHash],
+    );
+
+    let delivered = false;
+    try {
+      const sent = await sendStaffKycOtpEmail({ to: staff.email, code, staffName: staff.name });
+      delivered = Boolean(sent?.delivered);
+    } catch {
+      throw new HttpError(
+        502,
+        'The verification email could not be sent. Check the SMTP settings, or read the code from the server log.',
+      );
+    }
+
+    await audit({
+      actorType: 'admin',
+      actorId: req.admin.id,
+      action: 'staff.kyc.otp_sent',
+      entity: 'admin',
+      entityId: String(staff.id),
+      meta: { email: staff.email, delivered },
+      ip: clientIp(req),
+    });
+
+    res.json({ ok: true, delivered });
+  }),
+);
+
+adminRouter.post(
+  '/staff/:id/kyc/otp/verify',
+  asyncHandler(async (req, res) => {
+    const parsed = kycOtpSchema.safeParse(req.body);
+    if (!parsed.success) throw new HttpError(400, 'Enter the 6-digit code from the email.');
+
+    const [staff] = await query(
+      `SELECT id, email FROM admins WHERE id = ? AND role = 'staff' LIMIT 1`,
+      [req.params.id],
+    );
+    if (!staff) throw new HttpError(404, 'Staff account not found.');
+
+    const [otp] = await query(
+      `SELECT id, code_hash, attempts, expires_at FROM staff_kyc_otps
+       WHERE admin_id = ? AND purpose = 'email' AND consumed_at IS NULL
+       ORDER BY id DESC LIMIT 1`,
+      [staff.id],
+    );
+    if (!otp) throw new HttpError(400, 'Request a new verification code.');
+
+    if (new Date(String(otp.expires_at).replace(' ', 'T')) < new Date()) {
+      await query('UPDATE staff_kyc_otps SET consumed_at = NOW() WHERE id = ?', [otp.id]);
+      throw new HttpError(400, 'That code has expired. Send a new one.');
+    }
+    if (Number(otp.attempts) >= 5) {
+      await query('UPDATE staff_kyc_otps SET consumed_at = NOW() WHERE id = ?', [otp.id]);
+      throw new HttpError(400, 'Too many wrong attempts. Send a new code.');
+    }
+
+    const matches = await bcrypt.compare(parsed.data.code, otp.code_hash);
+    if (!matches) {
+      await query('UPDATE staff_kyc_otps SET attempts = attempts + 1 WHERE id = ?', [otp.id]);
+      throw new HttpError(400, 'That code is not correct.');
+    }
+
+    await query('UPDATE staff_kyc_otps SET consumed_at = NOW() WHERE id = ?', [otp.id]);
+    await query(
+      `INSERT INTO staff_kyc (admin_id, email_verified_at) VALUES (?, NOW())
+       ON DUPLICATE KEY UPDATE email_verified_at = NOW()`,
+      [staff.id],
+    );
+
+    await audit({
+      actorType: 'admin',
+      actorId: req.admin.id,
+      action: 'staff.kyc.otp_verified',
+      entity: 'admin',
+      entityId: String(staff.id),
+      meta: { email: staff.email },
+      ip: clientIp(req),
+    });
+
+    const fresh = await loadStaffKyc(staff.id);
+    res.json({ ok: true, kyc: kycPayload(fresh) });
   }),
 );
 

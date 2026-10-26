@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
+  BadgePercent,
   CalendarRange,
   ExternalLink,
   LayoutDashboard,
@@ -24,6 +25,7 @@ import AdminEvents from './admin/AdminEvents';
 import AdminLocations from './admin/AdminLocations';
 import AdminSchedules from './admin/AdminSchedules';
 import AdminBookings from './admin/AdminBookings';
+import AdminCoupons from './admin/AdminCoupons';
 import AdminCheckIn from './admin/AdminCheckIn';
 import AdminStaff from './admin/AdminStaff';
 import AdminSales from './admin/AdminSales';
@@ -35,6 +37,7 @@ type Tab =
   | 'events'
   | 'locations'
   | 'schedules'
+  | 'coupons'
   | 'bookings'
   | 'checkin'
   | 'sales'
@@ -51,6 +54,7 @@ const NAV: { id: Tab; label: string; icon: React.ReactNode; group: string }[] = 
   { id: 'events', label: 'Events & tickets', icon: <Ticket size={17} />, group: 'Event setup' },
   { id: 'locations', label: 'States & venues', icon: <MapPinned size={17} />, group: 'Event setup' },
   { id: 'schedules', label: 'Schedules & capacity', icon: <CalendarRange size={17} />, group: 'Event setup' },
+  { id: 'coupons', label: 'Coupons', icon: <BadgePercent size={17} />, group: 'Event setup' },
   { id: 'staff', label: 'Staff accounts', icon: <ShieldCheck size={17} />, group: 'Team' },
 ];
 
@@ -60,6 +64,7 @@ const PAGE_TITLES: Record<Tab, string> = {
   events: 'Events & tickets',
   locations: 'States & venues',
   schedules: 'Schedules & capacity',
+  coupons: 'Coupons',
   bookings: 'Bookings & reports',
   checkin: 'Gate check-in',
   sales: 'Sales & reminders',
@@ -215,6 +220,7 @@ function AdminShell() {
           {tab === 'events' && <AdminEvents />}
           {tab === 'locations' && <AdminLocations />}
           {tab === 'schedules' && <AdminSchedules />}
+          {tab === 'coupons' && <AdminCoupons />}
           {tab === 'bookings' && <AdminBookings />}
           {tab === 'checkin' && <AdminCheckIn />}
           {tab === 'sales' && <AdminSales />}

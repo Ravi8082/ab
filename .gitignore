@@ -10,6 +10,7 @@ node_modules
 dist
 dist-ssr
 *.local
+server/uploads
 
 .vscode/*
 !.vscode/extensions.json

@@ -8,6 +8,17 @@ import { LEGAL_CONTENT } from './legal-content.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
+const COOKIE_BANNER = {
+  title: { en: 'Your cookie choice', hi: 'कुकीज़ की आपकी पसंद' },
+  body: {
+    en: 'Strictly necessary cookies (sign-in, QR verification) always run. Optional analytics load only if you accept.',
+    hi: 'साइन-इन और QR जाँच के लिए केवल आवश्यक कुकीज़ हमेशा चलती हैं। वैकल्पिक एनालिटिक्स केवल आपकी स्वीकृति के बाद।',
+  },
+  necessary: { en: 'Necessary only', hi: 'केवल आवश्यक' },
+  accept: { en: 'Accept all', hi: 'सभी स्वीकार करें' },
+  privacy: { en: 'Privacy policy', hi: 'गोपनीयता नीति' },
+};
+
 async function main() {
   const root = await mysql.createConnection({
     host: config.db.host,
@@ -126,6 +137,12 @@ async function main() {
       [key, JSON.stringify(value)],
     );
   }
+
+  await root.query(
+    `INSERT INTO event_content (content_key, value_json) VALUES ('cookie_banner', ?)
+     ON DUPLICATE KEY UPDATE content_key = content_key`,
+    [JSON.stringify(COOKIE_BANNER)],
+  );
 
   await root.query(
     `INSERT IGNORE INTO event_booking_checkins (booking_id, entry_date, checked_in_by, created_at)

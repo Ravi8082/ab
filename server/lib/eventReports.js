@@ -66,11 +66,15 @@ const FROM_SQL = `
 `;
 
 const SELECT_COLUMNS = `
-  b.id, b.reference, b.name, b.email, b.phone, b.qty, b.unit_price, b.amount, b.status,
+  b.id, b.reference, b.event_id, b.schedule_id, b.name, b.email, b.phone, b.qty, b.pass_days,
+  b.unit_price, b.amount, b.status,
   b.source, b.guest_category, b.coupon_code, b.discount_amount, b.gross_amount, b.admin_note,
   b.otp_verified_at, b.pass_sent_at, b.check_in_at, b.created_at,
   (SELECT GROUP_CONCAT(att.name ORDER BY att.position SEPARATOR ' | ')
      FROM event_booking_attendees att WHERE att.booking_id = b.id) AS attendee_names,
+  (SELECT JSON_ARRAYAGG(JSON_OBJECT('position', att.position, 'name', att.name,
+                                    'phone', att.phone, 'email', att.email))
+     FROM event_booking_attendees att WHERE att.booking_id = b.id) AS attendees_json,
   e.name_en AS event_en, e.name_hi AS event_hi, e.kind,
   tt.name_en AS ticket_en, tt.name_hi AS ticket_hi,
   s.event_date, s.end_date,

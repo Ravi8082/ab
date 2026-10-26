@@ -395,6 +395,16 @@ export const issueLivePassCode = (reference: string, contact: string) =>
 
 export const fetchGateSettings = () => request<{ liveQrOnly: boolean }>('/api/events/gate-settings');
 
+export interface CookieBannerCopy {
+  title?: { en?: string; hi?: string };
+  body?: { en?: string; hi?: string };
+  necessary?: { en?: string; hi?: string };
+  accept?: { en?: string; hi?: string };
+  privacy?: { en?: string; hi?: string };
+}
+
+export const fetchCookieBanner = () => request<{ banner: CookieBannerCopy | null }>('/api/events/cookie-banner');
+
 export interface StaffScanResult {
   allowed: boolean;
   reference: string;

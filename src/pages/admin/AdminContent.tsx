@@ -11,12 +11,13 @@ const SECTION_META: Record<string, { label: string; hint: string }> = {
   process: { label: 'How it works', hint: 'The four booking steps shown to visitors' },
   faq: { label: 'FAQ', hint: 'Questions and answers in English and Hindi' },
   contact: { label: 'Help desk', hint: 'Support email, phone, WhatsApp and address' },
+  cookie_banner: { label: 'Cookie banner', hint: 'Banner title, text and button labels in English and Hindi' },
   legal_terms: { label: 'Terms & conditions', hint: 'The /terms page visitors must accept before paying' },
   legal_privacy: { label: 'Privacy policy', hint: 'The /privacy page, also linked from the cookie banner' },
   legal_refund: { label: 'Refund policy', hint: 'The /refund page shown at checkout and in the footer' },
 };
 
-const ORDER = ['hero', 'yatra', 'expo', 'process', 'faq', 'contact', 'legal_terms', 'legal_privacy', 'legal_refund'];
+const ORDER = ['hero', 'yatra', 'expo', 'process', 'faq', 'contact', 'cookie_banner', 'legal_terms', 'legal_privacy', 'legal_refund'];
 
 function sortSections(sections: AdminContentSection[]) {
   return [...sections].sort((a, b) => {

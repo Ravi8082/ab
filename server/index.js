@@ -52,6 +52,8 @@ function createApp() {
     razorpayWebhookHandler,
   );
 
+  // Staff KYC documents are posted as base64 JSON, so this admin-only branch needs a larger body.
+  app.use('/api/admin/staff', express.json({ limit: '8mb' }));
   app.use(express.json({ limit: '256kb' }));
   app.use(cookieParser());
 
