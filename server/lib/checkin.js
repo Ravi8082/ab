@@ -86,6 +86,19 @@ function attendeeList(value) {
   }
 }
 
+/** Names ticked by gate staff, de-duplicated and sorted so one scan can admit that many seats. */
+export function normalizePositions(value) {
+  if (value === undefined || value === null || value === '' || value.length === 0) return null;
+  if (!Array.isArray(value)) throw new HttpError(400, 'The attendee selection must be a list of names.');
+  const positions = [...new Set(value.map((item) => Number(item)))].sort((a, b) => a - b);
+  if (positions.length === 0) return null;
+  if (positions.length > 200) throw new HttpError(400, 'Too many names selected for one entry.');
+  if (positions.some((position) => !Number.isInteger(position) || position < 1)) {
+    throw new HttpError(400, 'The attendee selection is not valid.');
+  }
+  return positions;
+}
+
 /** Gate labels come from a staff-controlled field; keep them short, single-line and blank-safe. */
 function normalizeGate(value) {
   const label = String(value || '').replace(/\s+/g, ' ').trim().slice(0, 60);
@@ -111,18 +124,18 @@ function isSameGate(a, b) {
   return gateKey(a) === gateKey(b);
 }
 
-/** The sentence a guard needs when a QR comes in twice: who took the first entry, and from where. */
+/** The sentence a guard needs when a pass quota is full: who took the last entry, and from where. */
 function whereScanned(lastScan, sameGate) {
   if (!lastScan.gate) return '';
   const by = lastScan.staff ? ` by ${lastScan.staff}` : '';
   return sameGate
-    ? `It was taken at your gate (${lastScan.gate})${by}. `
-    : `It was already taken at a different gate — ${lastScan.gate}${by} — this looks like a forwarded QR. `;
+    ? `Last entry was at your gate (${lastScan.gate})${by}. `
+    : `Last entry was at a different gate — ${lastScan.gate}${by}. `;
 }
 
 async function lastScanAt(conn, bookingId) {
   const [rows] = await conn.execute(
-    `SELECT c.gate, a.name AS staff_name
+    `SELECT c.gate, c.created_at, a.name AS staff_name
      FROM event_booking_checkins c
      LEFT JOIN admins a ON a.id = c.checked_in_by
      WHERE c.booking_id = ?
@@ -130,7 +143,11 @@ async function lastScanAt(conn, bookingId) {
      LIMIT 1`,
     [bookingId],
   );
-  return { gate: rows[0]?.gate || null, staff: rows[0]?.staff_name || null };
+  return {
+    gate: rows[0]?.gate || null,
+    staff: rows[0]?.staff_name || null,
+    at: rows[0]?.created_at || null,
+  };
 }
 
 /**
@@ -191,9 +208,19 @@ function denialDetails(booking, extra) {
   };
 }
 
-export async function checkInBooking({ code, actor, ip, gate }) {
+export async function checkInBooking({
+  code,
+  actor,
+  ip,
+  gate,
+  entryDate = null,
+  clientScanId = null,
+  positions = null,
+}) {
   const value = String(code || '').trim();
   const gateLabel = normalizeGate(gate);
+  const wanted = normalizePositions(positions);
+  const offlineSync = Boolean(clientScanId);
   const live = parseLiveCode(value);
   if (!live && !isToken(value) && !isReference(value)) {
     throw new HttpError(400, 'This is not a valid pass code or reference number.');
@@ -245,6 +272,7 @@ export async function checkInBooking({ code, actor, ip, gate }) {
           reference: booking.reference,
           name: booking.name,
           guestCategory: booking.guest_category || 'visitor',
+          ticket: { name_en: booking.ticket_name_en, name_hi: booking.ticket_name_hi },
           reason: block.reason,
           blockedBy: block.blocked_by_name || null,
         },
@@ -291,7 +319,7 @@ export async function checkInBooking({ code, actor, ip, gate }) {
           denialDetails(booking, { reason: 'live_code_expired' }),
         );
       }
-    } else if ((await getGateSettings()).live_qr_only) {
+    } else if (!offlineSync && (await getGateSettings()).live_qr_only) {
       throw new HttpError(
         409,
         'Static QR passes are switched off. Ask the devotee to open the live pass and show the rotating QR.',
@@ -299,18 +327,50 @@ export async function checkInBooking({ code, actor, ip, gate }) {
       );
     }
 
-    const [[{ today }]] = await conn.query('SELECT CURDATE() AS today');
-    attempted.today = isoDate(today);
+    const [[{ today: serverTodayRaw }]] = await conn.query('SELECT CURDATE() AS today');
+    const serverToday = isoDate(serverTodayRaw);
+    let today = serverToday;
+    if (entryDate) {
+      const requested = isoDate(entryDate);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(requested) || Number.isNaN(Date.parse(`${requested}T00:00:00Z`))) {
+        throw new HttpError(400, 'This offline scan has an invalid entry date.');
+      }
+      if (dayGap(requested, serverToday) > 2) {
+        throw new HttpError(400, 'This offline scan is more than two days old and cannot be synced.');
+      }
+      if (dayGap(serverToday, requested) > 0) {
+        throw new HttpError(400, 'An offline scan cannot carry a future entry date.');
+      }
+      today = requested;
+    }
+    attempted.today = today;
     const startDate = isoDate(booking.event_date);
     const endDate = isoDate(booking.end_date || booking.event_date);
     const calendarDays = dayGap(startDate, endDate) + 1;
-    const entriesAllowed = Math.max(1, Math.min(Number(booking.pass_days || 1), calendarDays));
+    const daysAllowed = Math.max(1, Math.min(Number(booking.pass_days || 1), calendarDays));
+    // One QR covers everyone on the booking, so each scan admits one seat. A 5-seat
+    // single-day pass can therefore collect five rows for the same entry_date.
+    const seats = Math.max(1, Number(booking.qty) || 1);
+    const totalEntriesAllowed = seats * daysAllowed;
 
     if (today < startDate) {
       throw new HttpError(
         409,
         `This pass is valid from ${dateRangeLabel(startDate, endDate)}. Entry is not open yet.`,
-        denialDetails(booking, { reason: 'not_started', validFrom: startDate, validTo: endDate, entriesUsed: 0 }),
+        denialDetails(booking, {
+          reason: 'not_started',
+          validFrom: startDate,
+          validTo: endDate,
+          passDays: daysAllowed,
+          entriesAllowed: totalEntriesAllowed,
+          entriesUsed: 0,
+          entriesToday: 0,
+          entriesTodayAllowed: seats,
+          entriesTodayLeft: seats,
+          daysUsed: 0,
+          daysAllowed,
+          calendarDays,
+        }),
       );
     }
     if (today > endDate) {
@@ -322,34 +382,47 @@ export async function checkInBooking({ code, actor, ip, gate }) {
     }
 
     const [used] = await conn.execute(
-      `SELECT COUNT(*) AS days, MAX(entry_date) AS last_day, MAX(created_at) AS last_at
+      `SELECT COUNT(*) AS entries,
+              COUNT(DISTINCT entry_date) AS days,
+              COALESCE(SUM(entry_date = ?), 0) AS today_entries,
+              MAX(entry_date) AS last_day,
+              MAX(created_at) AS last_at
        FROM event_booking_checkins WHERE booking_id = ?`,
-      [booking.id],
+      [today, booking.id],
     );
+    const entriesUsed = Number(used[0].entries);
     const daysUsed = Number(used[0].days);
+    const entriesToday = Number(used[0].today_entries);
+    const entriesLeft = Math.max(0, totalEntriesAllowed - entriesUsed);
+    const dayNumber = dayGap(startDate, today) + 1;
 
-    if (daysUsed >= entriesAllowed) {
+    // No new event day is available once the pass has already used its covered days.
+    if (entriesToday === 0 && daysUsed >= daysAllowed) {
       const lastScan = await lastScanAt(conn, booking.id);
       const lastDay = isoDate(used[0].last_day);
-      const when =
-        lastDay === today
-          ? `Last entry today at ${String(used[0].last_at).slice(11, 16)}.`
-          : `Last entry on ${dayLabel(lastDay)}.`;
       const sameGate = isSameGate(lastScan.gate, gateLabel);
       throw new HttpError(
         409,
-        `This ${passLabel(entriesAllowed)} is fully used — ${daysUsed} of ${entriesAllowed} ${
-          entriesAllowed === 1 ? 'day is' : 'days are'
-        } entered. ${when} ${whereScanned(lastScan, sameGate)}No entry left.`,
+        `This ${passLabel(daysAllowed)} is used up — all ${daysAllowed} event ${
+          daysAllowed === 1 ? 'day has' : 'days have'
+        } already been entered. Last entry on ${dayLabel(lastDay)}. ${whereScanned(
+          lastScan,
+          sameGate,
+        )}No entry left for later dates.`,
         denialDetails(booking, {
           reason: 'entries_exhausted',
           validFrom: startDate,
           validTo: endDate,
-          passDays: entriesAllowed,
-          entriesAllowed,
-          entriesUsed: daysUsed,
-          entriesLeft: 0,
-          dayNumber: dayGap(startDate, today) + 1,
+          passDays: daysAllowed,
+          entriesAllowed: totalEntriesAllowed,
+          entriesUsed,
+          entriesLeft,
+          entriesToday,
+          entriesTodayAllowed: seats,
+          entriesTodayLeft: Math.max(0, seats - entriesToday),
+          daysUsed,
+          daysAllowed,
+          dayNumber,
           calendarDays,
           lastEntryDate: lastDay,
           lastEntryAt: used[0].last_at,
@@ -360,40 +433,38 @@ export async function checkInBooking({ code, actor, ip, gate }) {
       );
     }
 
-    const dayNumber = dayGap(startDate, today) + 1;
-
-    const [existing] = await conn.execute(
-      `SELECT c.created_at, c.gate, a.name AS staff_name
-       FROM event_booking_checkins c
-       LEFT JOIN admins a ON a.id = c.checked_in_by
-       WHERE c.booking_id = ? AND c.entry_date = ? LIMIT 1`,
-      [booking.id, today],
-    );
-    if (existing[0]) {
-      const time = String(existing[0].created_at).slice(11, 16);
-      const lastScan = { gate: existing[0].gate || null, staff: existing[0].staff_name || null };
-      // daysUsed already counts today, and the exhausted branch above ruled out daysUsed >= entriesAllowed.
-      const left = entriesAllowed - daysUsed;
+    // Every seat already came through today. The next day on this pass is still usable.
+    if (entriesToday >= seats) {
+      const lastScan = await lastScanAt(conn, booking.id);
+      const time = String(lastScan.at || used[0].last_at).slice(11, 16);
       const sameGate = isSameGate(lastScan.gate, gateLabel);
+      const daysLeft = Math.max(0, daysAllowed - daysUsed);
       throw new HttpError(
         409,
-        entriesAllowed === 1
-          ? `This pass was already checked in today at ${time}. ${whereScanned(lastScan, sameGate)}A single-day pass allows one entry.`
-          : `This pass is already used today at ${time}. ${whereScanned(lastScan, sameGate)}${left} more ${
-              left === 1 ? 'entry is' : 'entries are'
-            } still open on later event days.`,
+        `${seats === 1 ? 'The one seat on this booking has' : `All ${seats} seats on this booking have`} already entered today${
+          time ? ` (last entry at ${time})` : ''
+        }. ${whereScanned(lastScan, sameGate)}${
+          daysLeft > 0
+            ? `${daysLeft} more event ${daysLeft === 1 ? 'day is' : 'days are'} open on later dates.`
+            : 'No event days remain.'
+        }`,
         denialDetails(booking, {
           reason: 'already_scanned',
           validFrom: startDate,
           validTo: endDate,
-          passDays: entriesAllowed,
-          entriesAllowed,
-          entriesUsed: daysUsed,
-          entriesLeft: left,
+          passDays: daysAllowed,
+          entriesAllowed: totalEntriesAllowed,
+          entriesUsed,
+          entriesLeft,
+          entriesToday,
+          entriesTodayAllowed: seats,
+          entriesTodayLeft: 0,
+          daysUsed,
+          daysAllowed,
           dayNumber,
           calendarDays,
           lastEntryDate: today,
-          lastEntryAt: existing[0].created_at,
+          lastEntryAt: lastScan.at || used[0].last_at,
           lastGate: lastScan.gate,
           lastStaff: lastScan.staff,
           otherGate: !sameGate && Boolean(lastScan.gate && gateLabel),
@@ -401,10 +472,69 @@ export async function checkInBooking({ code, actor, ip, gate }) {
       );
     }
 
-    await conn.execute(
-      'INSERT INTO event_booking_checkins (booking_id, entry_date, checked_in_by, gate) VALUES (?, ?, ?, ?)',
-      [booking.id, today, actor.id, gateLabel],
+    const roster = attendeeList(booking.attendees_json);
+    const [namedRows] = await conn.execute(
+      `SELECT attendee_position FROM event_booking_checkins
+        WHERE booking_id = ? AND entry_date = ? AND attendee_position IS NOT NULL`,
+      [booking.id, today],
     );
+    const enteredPositions = new Set(namedRows.map((row) => Number(row.attendee_position)));
+    const seatsLeftToday = seats - entriesToday;
+    let admittedPositions;
+
+    if (wanted) {
+      const onPass = new Set(roster.map((att) => Number(att.position)));
+      const foreign = wanted.filter((position) => !onPass.has(position));
+      if (foreign.length) {
+        throw new HttpError(409, `Number ${foreign.join(', ')} is not a name on this pass.`, denialDetails(booking, {
+          reason: 'unknown_attendee',
+          entriesToday,
+          entriesTodayAllowed: seats,
+          entriesTodayLeft: seatsLeftToday,
+        }));
+      }
+      const repeated = wanted.filter((position) => enteredPositions.has(position));
+      if (repeated.length) {
+        const who = repeated.map(
+          (position) => roster.find((att) => Number(att.position) === position)?.name || `#${position}`,
+        );
+        throw new HttpError(409, `${who.join(', ')} already entered today on this pass.`, denialDetails(booking, {
+          reason: 'already_scanned',
+          entriesToday,
+          entriesTodayAllowed: seats,
+          entriesTodayLeft: seatsLeftToday,
+          repeatedNames: who,
+        }));
+      }
+      if (wanted.length > seatsLeftToday) {
+        throw new HttpError(
+          409,
+          `Only ${seatsLeftToday} ${seatsLeftToday === 1 ? 'seat is' : 'seats are'} still open today.`,
+          denialDetails(booking, {
+            reason: 'already_scanned',
+            entriesToday,
+            entriesTodayAllowed: seats,
+            entriesTodayLeft: seatsLeftToday,
+          }),
+        );
+      }
+      admittedPositions = wanted;
+    } else {
+      // A plain scan admits one seat and claims the first name that has not entered yet.
+      const next = roster.map((att) => Number(att.position)).find((position) => !enteredPositions.has(position));
+      admittedPositions = [next ?? null];
+    }
+
+    const admittedCount = admittedPositions.length;
+    for (const position of admittedPositions) {
+      await conn.execute(
+        `INSERT INTO event_booking_checkins (booking_id, entry_date, checked_in_by, gate, client_scan_id, attendee_position)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [booking.id, today, actor.id, gateLabel, clientScanId || null, position],
+      );
+    }
+    for (const position of admittedPositions) if (position !== null) enteredPositions.add(position);
+
     await conn.execute(
       `UPDATE event_bookings
        SET check_in_at = COALESCE(check_in_at, NOW()),
@@ -413,25 +543,37 @@ export async function checkInBooking({ code, actor, ip, gate }) {
       [actor.id, booking.id],
     );
 
-    if (liveCodeRow) {
+    const entriesTodayAfter = entriesToday + admittedCount;
+    const entriesUsedAfter = entriesUsed + admittedCount;
+    const daysUsedAfter = entriesToday > 0 ? daysUsed : daysUsed + 1;
+
+    // A live code is spent only when today's last seat has walked in, so the same
+    // 60-second code can admit the rest of the group.
+    if (liveCodeRow && entriesTodayAfter >= seats) {
       await conn.execute(
         'UPDATE event_pass_codes SET used_at = NOW(), used_gate = ? WHERE id = ?',
         [gateLabel, liveCodeRow.id],
       );
     }
 
-      const entriesUsed = daysUsed + 1;
       return {
         ...booking,
         check_in_at: 'now',
         entryDate: today,
         gate: gateLabel,
         liveCode: Boolean(live),
+        admittedPositions,
+        admittedCount,
+        enteredPositions: [...enteredPositions],
         dayNumber,
         calendarDays,
-        entriesAllowed,
-        entriesUsed,
-        entriesLeft: entriesAllowed - entriesUsed,
+        daysAllowed,
+        seats,
+        daysUsed: daysUsedAfter,
+        entriesToday: entriesTodayAfter,
+        entriesUsed: entriesUsedAfter,
+        entriesAllowed: totalEntriesAllowed,
+        entriesLeft: Math.max(0, totalEntriesAllowed - entriesUsedAfter),
       };
     });
   } catch (err) {
@@ -454,12 +596,18 @@ export async function checkInBooking({ code, actor, ip, gate }) {
     meta: {
       reference: result.reference,
       qty: Number(result.qty),
-      mode: result.liveCode ? 'live_qr' : isToken(value) ? 'qr' : 'reference',
+      mode: offlineSync ? 'offline_sync' : result.liveCode ? 'live_qr' : isToken(value) ? 'qr' : 'reference',
       gate: result.gate,
       entryDate: result.entryDate,
+      admittedCount: result.admittedCount,
+      attendeePositions: result.admittedPositions,
       dayNumber: result.dayNumber,
+      seats: result.seats,
+      entriesToday: result.entriesToday,
+      daysUsed: result.daysUsed,
       entriesUsed: result.entriesUsed,
       entriesAllowed: result.entriesAllowed,
+      ...(offlineSync ? { offline: true, clientScanId } : {}),
     },
     ip,
   });
@@ -477,18 +625,30 @@ export async function checkInBooking({ code, actor, ip, gate }) {
     source: result.source || 'online',
     guestCategory: result.guest_category || 'visitor',
     guestLabel: guestLabel(result.guest_category),
-    passDays: result.entriesAllowed,
+    passDays: result.daysAllowed,
     gate: result.gate,
     liveCode: result.liveCode,
     validFrom: isoDate(result.event_date),
     validTo: isoDate(result.end_date || result.event_date),
-    attendees: attendeeList(result.attendees_json),
+    attendees: attendeeList(result.attendees_json).map((att) => ({
+      ...att,
+      enteredToday: result.enteredPositions.includes(Number(att.position)),
+    })),
+    admittedPositions: result.admittedPositions.filter((position) => position !== null),
+    admittedCount: result.admittedCount,
     status: result.status,
     checkedInAt: new Date().toISOString(),
     checkIn: {
       entryDate: result.entryDate,
       dayNumber: result.dayNumber,
       calendarDays: result.calendarDays,
+      seats: result.seats,
+      entriesToday: result.entriesToday,
+      entriesTodayAllowed: result.seats,
+      entriesTodayLeft: Math.max(0, result.seats - result.entriesToday),
+      daysUsed: result.daysUsed,
+      daysAllowed: result.daysAllowed,
+      daysLeft: Math.max(0, result.daysAllowed - result.daysUsed),
       entriesUsed: result.entriesUsed,
       entriesAllowed: result.entriesAllowed,
       entriesLeft: result.entriesLeft,

@@ -1,5 +1,6 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
 import { adminLogin, adminLogout, adminMe, type AdminUser } from '@/lib/adminApi';
+import { clearGateCache } from '@/lib/offlineGate';
 
 interface AdminContextValue {
   session: AdminUser | null;
@@ -46,6 +47,7 @@ export function AdminProvider({ children }: { children: ReactNode }) {
     try {
       await adminLogout();
     } finally {
+      if (session) clearGateCache(session.id);
       setSession(null);
     }
   };

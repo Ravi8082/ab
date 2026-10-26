@@ -4,6 +4,7 @@ import {
   BadgePercent,
   CalendarRange,
   ExternalLink,
+  KeyRound,
   LayoutDashboard,
   LogOut,
   Mail,
@@ -11,6 +12,7 @@ import {
   Menu,
   Power,
   ScanLine,
+  ScrollText,
   ShieldCheck,
   Store,
   Ticket,
@@ -18,6 +20,8 @@ import {
   X,
 } from 'lucide-react';
 import { AdminProvider, useAdmin } from '@/context/AdminContext';
+import { useBrand } from '@/context/BrandContext';
+import BrandMark from '@/components/BrandMark';
 import AdminLogin from './admin/AdminLogin';
 import AdminDashboard from './admin/AdminDashboard';
 import AdminContent from './admin/AdminContent';
@@ -30,6 +34,8 @@ import AdminCheckIn from './admin/AdminCheckIn';
 import AdminStaff from './admin/AdminStaff';
 import AdminSales from './admin/AdminSales';
 import AdminEmails from './admin/AdminEmails';
+import AdminAudit from './admin/AdminAudit';
+import AdminAccount from './admin/AdminAccount';
 
 type Tab =
   | 'dashboard'
@@ -42,7 +48,9 @@ type Tab =
   | 'checkin'
   | 'sales'
   | 'emails'
-  | 'staff';
+  | 'audit'
+  | 'staff'
+  | 'account';
 
 const NAV: { id: Tab; label: string; icon: React.ReactNode; group: string }[] = [
   { id: 'dashboard', label: 'Dashboard', icon: <LayoutDashboard size={17} />, group: 'Overview' },
@@ -50,12 +58,14 @@ const NAV: { id: Tab; label: string; icon: React.ReactNode; group: string }[] = 
   { id: 'checkin', label: 'Gate check-in', icon: <ScanLine size={17} />, group: 'Overview' },
   { id: 'sales', label: 'Sales & reminders', icon: <Power size={17} />, group: 'Overview' },
   { id: 'emails', label: 'Email & OTP log', icon: <Mail size={17} />, group: 'Overview' },
+  { id: 'audit', label: 'Audit log', icon: <ScrollText size={17} />, group: 'Overview' },
   { id: 'content', label: 'Page content', icon: <Store size={17} />, group: 'Event setup' },
   { id: 'events', label: 'Events & tickets', icon: <Ticket size={17} />, group: 'Event setup' },
   { id: 'locations', label: 'States & venues', icon: <MapPinned size={17} />, group: 'Event setup' },
   { id: 'schedules', label: 'Schedules & capacity', icon: <CalendarRange size={17} />, group: 'Event setup' },
   { id: 'coupons', label: 'Coupons', icon: <BadgePercent size={17} />, group: 'Event setup' },
   { id: 'staff', label: 'Staff accounts', icon: <ShieldCheck size={17} />, group: 'Team' },
+  { id: 'account', label: 'My account', icon: <KeyRound size={17} />, group: 'Team' },
 ];
 
 const PAGE_TITLES: Record<Tab, string> = {
@@ -69,11 +79,14 @@ const PAGE_TITLES: Record<Tab, string> = {
   checkin: 'Gate check-in',
   sales: 'Sales & reminders',
   emails: 'Email & OTP log',
+  audit: 'Audit log',
   staff: 'Staff accounts',
+  account: 'My account',
 };
 
 function AdminShell() {
   const { session, isAdmin, loading, signOut } = useAdmin();
+  const { brand } = useBrand();
   const [tab, setTab] = useState<Tab>('dashboard');
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
@@ -125,14 +138,9 @@ function AdminShell() {
       >
         <div className="flex items-center justify-between border-b border-white/10 px-5 py-5">
           <Link to="/" className="flex items-center gap-2.5">
-            <svg width="32" height="32" viewBox="0 0 40 40" fill="none" aria-hidden="true">
-              <circle cx="20" cy="20" r="19" stroke="#13BBE8" strokeWidth="1.2" opacity=".5" />
-              <path d="M20 8c3.6 5 3.6 10.8 0 15.8C16.4 18.8 16.4 13 20 8Z" fill="#EE2C8F" />
-              <path d="M20 23.8c5.2-3 10.6-1.9 13.8 2.4-5.2 3-10.6 1.9-13.8-2.4Z" fill="#F39A1E" />
-              <path d="M20 23.8C14.8 20.8 9.4 21.9 6.2 26.2c5.2 3 10.6 1.9 13.8-2.4Z" fill="#FFD21F" />
-            </svg>
+            <BrandMark size={32} />
             <span className="leading-tight">
-              <span className="block font-display text-[1.05rem] font-semibold text-white">Adhyatmik Bharat</span>
+              <span className="block font-display text-[1.05rem] font-semibold text-white">{brand.name_en}</span>
               <span className="block font-ui text-[0.58rem] uppercase tracking-[0.2em] text-marigold/80">
                 Event admin
               </span>
@@ -225,7 +233,9 @@ function AdminShell() {
           {tab === 'checkin' && <AdminCheckIn />}
           {tab === 'sales' && <AdminSales />}
           {tab === 'emails' && <AdminEmails />}
+          {tab === 'audit' && <AdminAudit />}
           {tab === 'staff' && <AdminStaff />}
+          {tab === 'account' && <AdminAccount />}
         </main>
       </div>
     </div>

@@ -28,7 +28,7 @@ import type {
 } from '@/lib/eventApi';
 import { ApiError, eventApi } from '@/lib/eventApi';
 import { formatRupees } from '@/lib/pricing';
-import { bi, formatDateRange, formatTime, formatTimeRange } from '@/lib/eventFormat';
+import { bi, formatDateRange, formatTime, formatTimeRange, kindName } from '@/lib/eventFormat';
 import EventPass from '@/components/event/EventPass';
 import PriceTag from '@/components/event/PriceTag';
 
@@ -141,7 +141,6 @@ export default function BookingDrawer({
   const [booking, setBooking] = useState<CreateBookingResult | null>(null);
   const [otp, setOtp] = useState(['', '', '', '', '', '']);
   const [otpError, setOtpError] = useState('');
-  const [devCode, setDevCode] = useState('');
   const [resendIn, setResendIn] = useState(0);
   const [otpBusy, setOtpBusy] = useState(false);
   const [verifying, setVerifying] = useState(false);
@@ -196,7 +195,6 @@ export default function BookingDrawer({
     setBooking(null);
     setOtp(['', '', '', '', '', '']);
     setOtpError('');
-    setDevCode('');
     setResendIn(0);
     setOtpBusy(false);
     setVerifying(false);
@@ -254,8 +252,7 @@ export default function BookingDrawer({
     setOtpBusy(true);
     setOtpError('');
     try {
-      const result = await eventApi.requestOtp(reference);
-      setDevCode(result.devCode ?? '');
+      await eventApi.requestOtp(reference);
       setResendIn(45);
     } catch (error) {
       setOtpError(error instanceof Error ? error.message : 'Could not send the code.');
@@ -522,7 +519,7 @@ export default function BookingDrawer({
               <div className="relative flex items-start justify-between gap-3">
                 <div className="min-w-0">
                   <p className="font-ui text-[0.58rem] uppercase tracking-[0.22em] text-sky">
-                    {event.kind === 'expo' ? 'Expo registration' : 'Mahi Sundarkand'} · {lang === 'hi' ? 'पास बुकिंग' : 'Pass booking'}
+                    {kindName(event.kind, lang, event)} · {lang === 'hi' ? 'पास बुकिंग' : 'Pass booking'}
                   </p>
                   <h2 className="mt-1.5 truncate font-display text-[1.6rem] leading-tight text-white">
                     {lang === 'hi' ? event.name_hi : event.name_en}
@@ -1035,12 +1032,6 @@ export default function BookingDrawer({
                     ))}
                   </div>
 
-                  {devCode && (
-                    <div className="mx-auto mt-4 max-w-sm rounded-xl border border-amber-300/60 bg-amber-50 px-3.5 py-2.5 text-center text-xs text-amber-800">
-                      Development mode — your code is{' '}
-                      <strong className="font-mono text-sm tracking-[0.16em]">{devCode}</strong>
-                    </div>
-                  )}
                   {otpError && (
                     <div className="mx-auto mt-4 max-w-sm rounded-xl border border-red-400/30 bg-red-50 px-3.5 py-2.5 text-center text-sm text-red-700">
                       {otpError}

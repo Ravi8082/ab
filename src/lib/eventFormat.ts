@@ -14,6 +14,24 @@ export const pickL = (value: unknown, lang: Lang, fallback = ''): string => {
   return (lang === 'hi' ? v.hi || v.en : v.en || v.hi) || fallback;
 };
 
+const KIND_LABELS: Record<string, Localized> = {
+  yatra: { en: 'Yatra', hi: 'यात्रा' },
+  expo: { en: 'Expo', hi: 'एक्स्पो' },
+};
+
+/** Event types are admin-managed, so pass payloads carry only the slug. */
+export function kindName(
+  kind: string,
+  lang: Lang,
+  labels?: { kind_label?: string | null; kind_label_hi?: string | null },
+): string {
+  const direct = bi(labels?.kind_label, labels?.kind_label_hi, lang);
+  if (direct) return direct;
+  const known = KIND_LABELS[kind];
+  if (known) return bi(known.en, known.hi, lang);
+  return kind.replace(/[-_]+/g, ' ');
+}
+
 const MONTHS: Record<Lang, string[]> = {
   en: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
   hi: ['जनवरी', 'फरवरी', 'मार्च', 'अप्रैल', 'मई', 'जून', 'जुलाई', 'अगस्त', 'सितंबर', 'अक्टूबर', 'नवंबर', 'दिसंबर'],

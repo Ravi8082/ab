@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { CheckCircle2, FileText, RotateCcw, Save } from 'lucide-react';
 import { adminContent, adminSaveContent, type AdminContentSection } from '@/lib/adminApi';
 import SectionEditor from '@/components/admin/SectionEditor';
+import AdminBranding from '@/components/admin/AdminBranding';
 import { Button, Notice, PageHeader, Panel, Spinner, formatDateTime } from '@/components/admin/ui';
 
 const SECTION_META: Record<string, { label: string; hint: string }> = {
@@ -121,6 +122,8 @@ export default function AdminContent() {
           <Notice tone="success">{notice}</Notice>
         </div>
       )}
+
+      <AdminBranding />
 
       {loading ? (
         <Panel>

@@ -3,9 +3,11 @@ import { Link } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { ArrowLeft, Eye, EyeOff, Loader2, Lock, Mail, ShieldCheck } from 'lucide-react';
 import { useAdmin } from '@/context/AdminContext';
+import { useBrand } from '@/context/BrandContext';
 
 export default function AdminLogin({ variant = 'admin' }: { variant?: 'admin' | 'staff' }) {
   const { signIn } = useAdmin();
+  const { brand } = useBrand();
   const isStaff = variant === 'staff';
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -57,7 +59,7 @@ export default function AdminLogin({ variant = 'admin' }: { variant?: 'admin' | 
                 <Lock size={21} className="text-marigold" />
               </span>
               <div>
-                <p className="font-ui text-[0.58rem] uppercase tracking-[0.22em] text-sky">Adhyatmik Bharat</p>
+                <p className="font-ui text-[0.58rem] uppercase tracking-[0.22em] text-sky">{brand.name_en}</p>
                 <h1 className="font-display text-[1.7rem] leading-tight text-white">
                   {isStaff ? 'Staff scanner' : 'Admin panel'}
                 </h1>

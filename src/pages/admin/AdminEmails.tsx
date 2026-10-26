@@ -23,6 +23,7 @@ const KIND_LABEL: Record<AdminEmailLog['kind'], string> = {
   pass: 'QR pass',
   reminder: 'Reminder',
   test: 'Test',
+  notice: 'Booking update',
 };
 
 const EMAIL_STATUS_STYLE: Record<AdminEmailLog['status'], string> = {

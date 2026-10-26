@@ -8,6 +8,8 @@ import type {
   EventVenue,
 } from '@/lib/eventApi';
 
+export type EventLayout = 'route' | 'single';
+
 export interface TicketAvailability {
   ticket: EventTicket;
   capacity: number;
@@ -56,8 +58,47 @@ export function buildContexts(data: EventPageData | null): ScheduleContext[] {
   return contexts;
 }
 
-export function findEvent(data: EventPageData | null, kind: 'yatra' | 'expo'): EventInfo | null {
-  return data?.events.find((event) => event.kind === kind) ?? null;
+/** The page is India-only, so "today" must follow IST even when the browser clock is elsewhere. */
+export function indiaToday(now: Date = new Date()): string {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Kolkata',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(now);
+}
+
+/** A multi-day pass stays live until its last day, not its first. */
+export function isPastSchedule(schedule: EventSchedule, today: string): boolean {
+  const lastDay = String(schedule.end_date || schedule.event_date).slice(0, 10);
+  return lastDay < today;
+}
+
+/** Soonest date first; within a day, earliest start time first. */
+export function sortContexts(contexts: ScheduleContext[]): ScheduleContext[] {
+  return [...contexts].sort((a, b) => {
+    const dateA = String(a.schedule.event_date).slice(0, 10);
+    const dateB = String(b.schedule.event_date).slice(0, 10);
+    if (dateA !== dateB) return dateA.localeCompare(dateB);
+    const timeA = a.schedule.start_time || '00:00:00';
+    const timeB = b.schedule.start_time || '00:00:00';
+    if (timeA !== timeB) return timeA.localeCompare(timeB);
+    return a.schedule.id - b.schedule.id;
+  });
+}
+
+/** Events are no longer fixed to two types — the admin picks a layout per type. */
+export function eventsByLayout(data: EventPageData | null, layout: EventLayout): EventInfo[] {
+  return data?.events.filter((event) => event.kind_layout === layout) ?? [];
+}
+
+export function findEventByLayout(data: EventPageData | null, layout: EventLayout): EventInfo | null {
+  return eventsByLayout(data, layout)[0] ?? null;
+}
+
+/** Passes shown in the route slot: every route event's tickets, in their own order. */
+export function ticketsForLayout(data: EventPageData | null, layout: EventLayout): EventTicket[] {
+  return eventsByLayout(data, layout).flatMap((event) => event.tickets);
 }
 
 export function contextFor(contexts: ScheduleContext[], scheduleId: number | null): ScheduleContext | null {

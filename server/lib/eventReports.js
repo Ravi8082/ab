@@ -63,6 +63,8 @@ const FROM_SQL = `
   JOIN event_cities c ON c.id = s.city_id
   JOIN event_venues v ON v.id = s.venue_id
   LEFT JOIN admins a ON a.id = b.checked_in_by
+  LEFT JOIN admins ca ON ca.id = b.cancelled_by
+  LEFT JOIN admins ra ON ra.id = b.refunded_by
 `;
 
 const SELECT_COLUMNS = `
@@ -70,6 +72,7 @@ const SELECT_COLUMNS = `
   b.unit_price, b.amount, b.status,
   b.source, b.guest_category, b.coupon_code, b.discount_amount, b.gross_amount, b.admin_note,
   b.otp_verified_at, b.pass_sent_at, b.check_in_at, b.created_at,
+  b.cancelled_at, b.cancel_reason, b.refund_amount, b.refund_reference, b.refunded_at,
   (SELECT GROUP_CONCAT(att.name ORDER BY att.position SEPARATOR ' | ')
      FROM event_booking_attendees att WHERE att.booking_id = b.id) AS attendee_names,
   (SELECT JSON_ARRAYAGG(JSON_OBJECT('position', att.position, 'name', att.name,
@@ -81,7 +84,7 @@ const SELECT_COLUMNS = `
   st.name_en AS state_en, st.name_hi AS state_hi,
   c.name_en AS city_en, c.name_hi AS city_hi,
   v.name_en AS venue_en, v.name_hi AS venue_hi, v.address_en, v.address_hi,
-  a.name AS checked_in_by_name
+  a.name AS checked_in_by_name, ca.name AS cancelled_by_name, ra.name AS refunded_by_name
 `;
 
 export async function fetchAdminBookings(filters, limit = 500) {
@@ -347,6 +350,12 @@ export async function exportBookingsXlsx(filters) {
       { header: 'OTP verified', width: 12 },
       { header: 'Checked in at', width: 20 },
       { header: 'Checked in by', width: 18 },
+      { header: 'Cancelled at', width: 20 },
+      { header: 'Cancelled by', width: 18 },
+      { header: 'Cancel reason', width: 32 },
+      { header: 'Refund', width: 14, money: true },
+      { header: 'Refund ref', width: 22 },
+      { header: 'Refunded at', width: 20 },
     ],
     rows.map((row) => [
       row.reference, row.status, row.event_en, row.ticket_en, row.name, row.email, row.phone,
@@ -356,6 +365,9 @@ export async function exportBookingsXlsx(filters) {
       row.state_en, row.city_en,
       row.venue_en, row.address_en, row.event_date, row.created_at, row.otp_verified_at ? 'Yes' : 'No',
       row.check_in_at || '', row.checked_in_by_name || '',
+      row.cancelled_at || '', row.cancelled_by_name || '', row.cancel_reason || '',
+      row.refund_amount == null ? '' : Number(row.refund_amount),
+      row.refund_reference || '', row.refunded_at || '',
     ]),
   );
 
@@ -477,6 +489,7 @@ export async function exportBookingsPdf(filters) {
           row.status,
           row.guest_category && row.guest_category !== 'visitor' ? row.guest_category : '',
           row.source === 'admin_free' ? 'free issue' : '',
+          row.refund_amount != null ? `refund Rs ${Number(row.refund_amount).toLocaleString('en-IN')}` : '',
         ].filter(Boolean).join(' · '),
         row.check_in_at ? 'Checked in' : '—',
       ];

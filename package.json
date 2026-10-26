@@ -10,13 +10,14 @@
     "build": "vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit -p tsconfig.app.json"
+    "typecheck": "tsc --noEmit -p tsconfig.app.json",
+    "test": "node --test \"server/tests/*.test.mjs\"",
+    "backup": "node server/scripts/backup-db.js"
   },
   "dependencies": {
     "@hookform/resolvers": "^6.0.0",
     "@react-three/drei": "^9.122.0",
     "@react-three/fiber": "^8.18.0",
-    "@supabase/supabase-js": "^2.57.4",
     "@types/three": "^0.160.0",
     "framer-motion": "^11.18.2",
     "html5-qrcode": "^2.3.8",

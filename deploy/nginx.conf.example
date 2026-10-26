@@ -1,0 +1,122 @@
+# Example nginx site for Adhyatmik Bharat.
+# Replace example.com with the real domain and point the certificate paths at your
+# Let's Encrypt (or other) certs. The Node API runs on 127.0.0.1:4000 via PM2.
+#
+# SPA files are served straight from dist/ (built with `npm run build`), and /api/
+# is proxied to Express. If you prefer Express to serve the SPA too, proxy / as
+# well — but serving static files here is faster.
+
+upstream adhyatmik_api {
+    server 127.0.0.1:4000;
+    keepalive 32;
+}
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name example.com www.example.com;
+
+    # Certbot webroot; everything else goes to HTTPS.
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+
+    location / {
+        return 301 https://www.example.com$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/example.com/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 1d;
+
+    return 301 https://www.example.com$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name www.example.com;
+
+    root /var/www/adhyatmik/dist;
+    index index.html;
+
+    ssl_certificate     /etc/letsencrypt/live/example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/example.com/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 1d;
+
+    # Staff KYC documents are uploaded as base64 JSON (Express allows 8mb).
+    client_max_body_size 10m;
+
+    gzip on;
+    gzip_comp_level 6;
+    gzip_min_length 1024;
+    gzip_types text/plain text/css application/javascript application/json image/svg+xml application/xml;
+
+    add_header X-Content-Type-Options nosniff always;
+    add_header X-Frame-Options SAMEORIGIN always;
+    add_header Referrer-Policy strict-origin-when-cross-origin always;
+
+    # Razorpay needs the raw body untouched — disable buffering for webhooks.
+    location = /api/payments/razorpay/webhook {
+        proxy_pass http://adhyatmik_api;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_request_buffering off;
+        proxy_read_timeout 30s;
+    }
+
+    location /api/ {
+        proxy_pass http://adhyatmik_api;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Connection "";
+        proxy_read_timeout 60s;
+    }
+
+    # Hashed Vite assets never change.
+    location /assets/ {
+        access_log off;
+        expires 1y;
+        add_header Cache-Control "public, max-age=31536000, immutable";
+        try_files $uri =404;
+    }
+
+    # Media and social images change rarely.
+    location ~* \.(png|jpg|jpeg|webp|avif|svg|ico|woff2?)$ {
+        access_log off;
+        expires 30d;
+        add_header Cache-Control "public, max-age=2592000";
+        try_files $uri =404;
+    }
+
+    location = /index.html {
+        add_header Cache-Control "no-cache";
+    }
+
+    location = /sw.js {
+        add_header Cache-Control "no-cache";
+    }
+
+    # Client-side routes (React Router) — always fall back to the SPA shell.
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}

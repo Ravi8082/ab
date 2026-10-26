@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS admins (
   name            VARCHAR(120) NOT NULL DEFAULT 'Admin',
   role            ENUM('owner','manager','staff') NOT NULL DEFAULT 'owner',
   active          TINYINT(1) NOT NULL DEFAULT 1,
+  token_version   INT NOT NULL DEFAULT 0,
   failed_attempts INT NOT NULL DEFAULT 0,
   locked_until    DATETIME NULL,
   last_login_at   DATETIME NULL,
@@ -201,10 +202,19 @@ CREATE TABLE IF NOT EXISTS event_venues (
   CONSTRAINT fk_event_venue_city FOREIGN KEY (city_id) REFERENCES event_cities(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+CREATE TABLE IF NOT EXISTS event_kinds (
+  slug       VARCHAR(32) PRIMARY KEY,
+  label_en   VARCHAR(60) NOT NULL,
+  label_hi   VARCHAR(80) NOT NULL,
+  layout     ENUM('route','single') NOT NULL DEFAULT 'route',
+  sort_order INT NOT NULL DEFAULT 0,
+  active     TINYINT(1) NOT NULL DEFAULT 1
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 CREATE TABLE IF NOT EXISTS events (
   id             INT AUTO_INCREMENT PRIMARY KEY,
   slug           VARCHAR(64) NOT NULL UNIQUE,
-  kind           ENUM('yatra','expo') NOT NULL,
+  kind           VARCHAR(32) NOT NULL DEFAULT 'yatra',
   name_en        VARCHAR(160) NOT NULL,
   name_hi        VARCHAR(200) NOT NULL,
   tagline_en     VARCHAR(255) NOT NULL DEFAULT '',
@@ -368,6 +378,13 @@ CREATE TABLE IF NOT EXISTS event_bookings (
   pass_sent_at   DATETIME NULL,
   check_in_at    DATETIME NULL,
   checked_in_by  INT NULL,
+  cancelled_at   DATETIME NULL,
+  cancelled_by   INT NULL,
+  cancel_reason  VARCHAR(255) NULL,
+  refund_amount  INT NULL,
+  refund_reference VARCHAR(120) NULL,
+  refunded_at    DATETIME NULL,
+  refunded_by    INT NULL,
   created_at     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   KEY idx_event_booking_email (email),
   KEY idx_event_booking_phone (phone),
@@ -380,7 +397,9 @@ CREATE TABLE IF NOT EXISTS event_bookings (
   CONSTRAINT fk_eb_event FOREIGN KEY (event_id) REFERENCES events(id),
   CONSTRAINT fk_eb_schedule FOREIGN KEY (schedule_id) REFERENCES event_schedules(id),
   CONSTRAINT fk_eb_ticket FOREIGN KEY (ticket_type_id) REFERENCES event_ticket_types(id),
-  CONSTRAINT fk_eb_issuer FOREIGN KEY (issued_by) REFERENCES admins(id) ON DELETE SET NULL
+  CONSTRAINT fk_eb_issuer FOREIGN KEY (issued_by) REFERENCES admins(id) ON DELETE SET NULL,
+  CONSTRAINT fk_eb_canceller FOREIGN KEY (cancelled_by) REFERENCES admins(id) ON DELETE SET NULL,
+  CONSTRAINT fk_eb_refunder FOREIGN KEY (refunded_by) REFERENCES admins(id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS event_coupon_uses (
@@ -408,14 +427,19 @@ CREATE TABLE IF NOT EXISTS event_booking_otps (
   CONSTRAINT fk_eotp_booking FOREIGN KEY (booking_id) REFERENCES event_bookings(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+-- One row per person admitted. A booking with qty 5 collects up to five rows on the same
+-- entry_date, so the (booking_id, entry_date) index is deliberately not unique.
 CREATE TABLE IF NOT EXISTS event_booking_checkins (
   id            BIGINT AUTO_INCREMENT PRIMARY KEY,
   booking_id    BIGINT NOT NULL,
   entry_date    DATE NOT NULL,
   checked_in_by INT NULL,
   gate          VARCHAR(60) NULL,
+  -- Set for scans queued by the offline gate scanner, so replaying a queue cannot double-admit.
+  client_scan_id VARCHAR(64) NULL,
   created_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  UNIQUE KEY uq_checkin_booking_day (booking_id, entry_date),
+  UNIQUE KEY uq_checkin_client_scan (client_scan_id),
+  KEY idx_checkin_booking_day (booking_id, entry_date),
   KEY idx_checkin_day (entry_date),
   KEY idx_checkin_staff (checked_in_by),
   CONSTRAINT fk_checkin_booking FOREIGN KEY (booking_id) REFERENCES event_bookings(id) ON DELETE CASCADE
@@ -547,7 +571,7 @@ CREATE TABLE IF NOT EXISTS email_reminders (
 -- written to this table; it stores delivery metadata for support and audit.
 CREATE TABLE IF NOT EXISTS email_log (
   id            BIGINT AUTO_INCREMENT PRIMARY KEY,
-  kind          ENUM('otp','pass','reminder','test') NOT NULL,
+  kind          ENUM('otp','pass','reminder','test','notice') NOT NULL,
   recipient     VARCHAR(190) NOT NULL,
   subject       VARCHAR(255) NOT NULL,
   booking_id    BIGINT NULL,

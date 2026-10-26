@@ -1,6 +1,8 @@
 import { Link } from 'react-router-dom';
 import { Mail, MapPin, MessageCircle, Phone, ShieldCheck, UserCog } from 'lucide-react';
 import { useApp } from '@/context/AppContext';
+import { useBrand } from '@/context/BrandContext';
+import BrandMark from '@/components/BrandMark';
 import { pickL } from '@/lib/eventFormat';
 import { openCookieSettings } from '@/components/CookieConsent';
 
@@ -11,21 +13,9 @@ const JUMP = [
   { id: 'faq', en: 'Questions', hi: 'सामान्य प्रश्न' },
 ];
 
-function LotusMark() {
-  return (
-    <svg width="42" height="42" viewBox="0 0 40 40" fill="none" aria-hidden="true">
-      <circle cx="20" cy="20" r="19" stroke="#13BBE8" strokeOpacity=".45" />
-      <path d="M20 9c3.4 4.6 3.4 9.8 0 14.4-3.4-4.6-3.4-9.8 0-14.4Z" fill="#EE2C8F" />
-      <path d="M20 23.4c4-2.2 8.4-1.6 11.4 1.6-4 2.2-8.4 1.6-11.4-1.6Z" fill="#F39A1E" />
-      <path d="M20 23.4c-4-2.2-8.4-1.6-11.4 1.6 4 2.2 8.4 1.6 11.4-1.6Z" fill="#F39A1E" />
-      <path d="M20 23.4c5-2.6 10.4-2.4 14.4.8-5 2.6-10.4 2.4-14.4-.8Z" fill="#FFD21F" fillOpacity=".85" />
-      <path d="M20 23.4c-5-2.6-10.4-2.4-14.4.8 5 2.6 10.4 2.4 14.4-.8Z" fill="#FFD21F" fillOpacity=".85" />
-    </svg>
-  );
-}
-
 export default function SiteFooter({ contact }: { contact?: Record<string, unknown> }) {
   const { lang } = useApp();
+  const { brand } = useBrand();
 
   const email = typeof contact?.email === 'string' ? contact.email : 'adhyatmikbharatexpo@gmail.com';
   const phone = typeof contact?.phone === 'string' ? contact.phone : '+91 7499658454';
@@ -38,10 +28,10 @@ export default function SiteFooter({ contact }: { contact?: Record<string, unkno
         <div className="grid gap-10 md:grid-cols-2 lg:grid-cols-[1.35fr_.8fr_1fr_.8fr]">
           <div>
             <div className="flex items-center gap-3">
-              <LotusMark />
+              <BrandMark size={42} />
               <div>
-                <p className="font-hindi text-lg text-marigold">आध्यात्मिक भारत</p>
-                <p className="font-display text-2xl leading-tight text-white">Adhyatmik Bharat</p>
+                <p className="font-hindi text-lg text-marigold">{brand.name_hi}</p>
+                <p className="font-display text-2xl leading-tight text-white">{brand.name_en}</p>
               </div>
             </div>
             <p className="mt-4 max-w-sm text-sm font-light leading-relaxed text-cream-on-dark/60">
@@ -135,7 +125,7 @@ export default function SiteFooter({ contact }: { contact?: Record<string, unkno
 
         <div className="mt-12 flex flex-col items-center justify-between gap-3 border-t border-white/10 pt-5 text-xs text-cream-on-dark/40 sm:flex-row">
           <span>
-            © {new Date().getFullYear()} Adhyatmik Bharat.{' '}
+            © {new Date().getFullYear()} {brand.name_en}.{' '}
             {lang === 'hi' ? 'सर्वाधिकार सुरक्षित।' : 'All rights reserved.'}
           </span>
           <span className="flex flex-wrap items-center justify-center gap-4 sm:justify-end">

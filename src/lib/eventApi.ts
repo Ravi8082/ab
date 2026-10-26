@@ -33,7 +33,10 @@ export interface EventTicket {
 export interface EventInfo {
   id: number;
   slug: string;
-  kind: 'yatra' | 'expo';
+  kind: string;
+  kind_label: string;
+  kind_label_hi: string;
+  kind_layout: 'route' | 'single';
   name_en: string;
   name_hi: string;
   tagline_en: string;
@@ -138,8 +141,6 @@ export interface WaitlistResult {
   verified: boolean;
   nextStep: 'otp' | 'done';
   delivered?: boolean;
-  devMode?: boolean;
-  devCode?: string;
 }
 
 export interface BookingAttendee {
@@ -161,7 +162,9 @@ export interface EventBookingPass {
   qrToken: string | null;
   checkInAt: string | null;
   todayCheckInAt: string | null;
+  todayCheckInCount: number;
   checkInCount: number;
+  checkInDays: number;
   passDays: number;
   calendarDays: number;
   entriesLeft: number;
@@ -175,7 +178,9 @@ export interface EventBookingPass {
   attendees?: BookingAttendee[];
   event: {
     slug: string;
-    kind: 'yatra' | 'expo';
+    kind: string;
+    kind_label?: string | null;
+    kind_label_hi?: string | null;
     name_en: string;
     name_hi: string;
     date_label_en: string;
@@ -335,7 +340,7 @@ export const eventApi = {
   }) => request<CouponPreview>('/api/events/coupon/preview', { method: 'POST', body: JSON.stringify(input) }),
 
   requestOtp: (reference: string) =>
-    request<{ sent: boolean; devMode: boolean; devCode?: string }>(
+    request<{ sent: boolean }>(
       `/api/events/bookings/${encodeURIComponent(reference)}/otp`,
       { method: 'POST' },
     ),

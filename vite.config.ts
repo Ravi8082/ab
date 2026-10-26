@@ -29,7 +29,6 @@ export default defineConfig({
           'three-vendor': ['three', '@react-three/fiber', '@react-three/drei'],
           'motion-vendor': ['framer-motion', 'lenis'],
           'pdf-vendor': ['jspdf', 'qrcode'],
-          'supabase-vendor': ['@supabase/supabase-js'],
         },
       },
     },

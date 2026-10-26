@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   CalendarDays,
   MapPin,
@@ -8,20 +8,28 @@ import {
   Trash2,
 } from 'lucide-react';
 import {
+  adminCreateEvent,
+  adminCreateEventKind,
   adminCreateTicket,
+  adminDeleteEventKind,
   adminDeleteTicket,
   adminDeleteTicketSlab,
+  adminEventKinds,
   adminEvents,
   adminSaveTicketSlab,
   adminUpdateEvent,
+  adminUpdateEventKind,
   adminUpdateTicket,
+  type AdminEventKind,
   type EventInput,
   type EventRow,
   type EventTicketRow,
+  type NewEventInput,
   type TicketInput,
 } from '@/lib/adminApi';
 import { datedPricing, formatRupees } from '@/lib/pricing';
 import { LocalizedListEditor } from '@/components/admin/SectionEditor';
+import { EventKindForm, type KindValues } from '@/components/admin/EventKindForm';
 import {
   Button,
   Field,
@@ -29,6 +37,7 @@ import {
   Notice,
   PageHeader,
   Panel,
+  Select,
   Spinner,
   TextArea,
   TextInput,
@@ -52,6 +61,23 @@ const emptyEvent = (event: EventRow): EventInput => ({
   ends_on: event.ends_on ?? '',
   sale_ends_at: toInputDateTime(event.sale_ends_at),
   active: Number(event.active),
+});
+
+const blankEvent = (): NewEventInput => ({
+  kind: 'yatra',
+  slug: '',
+  name_en: '',
+  name_hi: '',
+  tagline_en: '',
+  tagline_hi: '',
+  description_en: '',
+  description_hi: '',
+  date_label_en: '',
+  date_label_hi: '',
+  starts_on: '',
+  ends_on: '',
+  sale_ends_at: '',
+  active: 1,
 });
 
 const emptyTicket = (eventId: number): TicketInput => ({
@@ -97,7 +123,11 @@ export default function AdminEvents() {
   const [notice, setNotice] = useState('');
   const [saving, setSaving] = useState(false);
 
-  const [eventEditor, setEventEditor] = useState<{ event: EventRow; draft: EventInput } | null>(null);
+  const [eventEditor, setEventEditor] = useState<{
+    mode: 'new' | 'edit';
+    event: EventRow | null;
+    draft: NewEventInput;
+  } | null>(null);
   const [ticketEditor, setTicketEditor] = useState<{
     mode: 'new' | 'edit';
     eventId: number;
@@ -106,12 +136,19 @@ export default function AdminEvents() {
   } | null>(null);
   const [slabDraft, setSlabDraft] = useState({ effective_from: '', price: 0, label_en: '', label_hi: '' });
   const [slabBusy, setSlabBusy] = useState(false);
+  const [kinds, setKinds] = useState<AdminEventKind[]>([]);
+  const [quickKindOpen, setQuickKindOpen] = useState(false);
+  const [kindEditor, setKindEditor] = useState<{ slug: string | null; draft: KindValues } | null>(null);
+  const [kindBusy, setKindBusy] = useState(false);
+
+  const activeKinds = useMemo(() => kinds.filter((kind) => Number(kind.active) === 1), [kinds]);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const result = await adminEvents();
+      const [result, kindResult] = await Promise.all([adminEvents(), adminEventKinds()]);
       setEvents(result.events);
+      setKinds(kindResult.kinds);
       setError('');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not load events.');
@@ -126,18 +163,134 @@ export default function AdminEvents() {
 
   const saveEvent = async () => {
     if (!eventEditor) return;
+    const { draft } = eventEditor;
+    if (draft.name_en.trim().length < 2) {
+      setError('Enter the event name in English — at least 2 characters.');
+      return;
+    }
+    if (!draft.name_hi.trim()) {
+      setError('Enter the event name in हिंदी.');
+      return;
+    }
     setSaving(true);
     setError('');
     setNotice('');
     try {
-      await adminUpdateEvent(eventEditor.event.id, eventEditor.draft);
-      setEventEditor(null);
-      setNotice('Event details saved.');
+      if (eventEditor.mode === 'new') {
+        const created = await adminCreateEvent({ ...draft, slug: (draft.slug ?? '').trim() || undefined });
+        setEventEditor(null);
+        setNotice(
+          `${draft.name_en} created with address "${created.slug}". Add its tickets below, then set the city, venue and seat capacity in Schedules.`,
+        );
+      } else if (eventEditor.event) {
+        await adminUpdateEvent(eventEditor.event.id, draft);
+        setEventEditor(null);
+        setNotice('Event details saved.');
+      }
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not save the event.');
     } finally {
       setSaving(false);
+    }
+  };
+
+  const patchEvent = (patch: Partial<NewEventInput>) =>
+    setEventEditor((current) => (current ? { ...current, draft: { ...current.draft, ...patch } } : current));
+
+  // Event types are admin-managed, so the list can grow (or an old slug can be switched off)
+  // while the Add-event form is open — keep the draft pointing at something selectable.
+  useEffect(() => {
+    if (!eventEditor || eventEditor.mode !== 'new' || activeKinds.length === 0) return;
+    if (activeKinds.some((kind) => kind.slug === eventEditor.draft.kind)) return;
+    patchEvent({ kind: activeKinds[0].slug });
+  }, [activeKinds, eventEditor]);
+
+  // A saved event can point at a type that was later switched off — keep it selectable in the form.
+  const kindOptions = useMemo(() => {
+    const list = [...activeKinds];
+    const current = eventEditor?.draft.kind;
+    if (current && !list.some((kind) => kind.slug === current)) {
+      const legacy = kinds.find((kind) => kind.slug === current);
+      list.push(
+        legacy ?? {
+          slug: current,
+          label_en: current,
+          label_hi: current,
+          layout: 'route',
+          sort_order: 0,
+          active: 0,
+          event_count: 0,
+        },
+      );
+    }
+    return list;
+  }, [activeKinds, eventEditor?.draft.kind, kinds]);
+
+  const selectedKind = kinds.find((kind) => kind.slug === eventEditor?.draft.kind);
+
+  useEffect(() => {
+    if (!eventEditor) setQuickKindOpen(false);
+  }, [eventEditor]);
+
+  const saveKind = async (values: KindValues) => {
+    const labelEn = values.label_en.trim();
+    const labelHi = values.label_hi.trim();
+    if (labelEn.length < 2) {
+      setError('Enter the type name in English — at least 2 characters.');
+      return;
+    }
+    if (!labelHi) {
+      setError('Enter the type name in हिंदी.');
+      return;
+    }
+    setKindBusy(true);
+    setError('');
+    setNotice('');
+    try {
+      let createdSlug: string | null = null;
+      if (kindEditor?.slug) {
+        await adminUpdateEventKind(kindEditor.slug, {
+          label_en: labelEn,
+          label_hi: labelHi,
+          layout: values.layout,
+          active: values.active,
+        });
+        setKindEditor(null);
+        setNotice(`Type "${labelEn}" updated.`);
+      } else {
+        const created = await adminCreateEventKind({
+          label_en: labelEn,
+          label_hi: labelHi,
+          layout: values.layout,
+          active: values.active,
+          sort_order: (kinds.length + 1) * 10,
+        });
+        createdSlug = created.slug;
+        setQuickKindOpen(false);
+        setNotice(`"${labelEn}" is now an event type — pick it when you add an event.`);
+      }
+      await load();
+      // Selecting the new type only works once the refreshed list actually contains it.
+      if (createdSlug) patchEvent({ kind: createdSlug });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not save the event type.');
+    } finally {
+      setKindBusy(false);
+    }
+  };
+
+  const removeKind = async (kind: AdminEventKind) => {
+    if (!window.confirm(`Delete the type "${kind.label_en}"? Move its events to another type first.`)) return;
+    setError('');
+    setNotice('');
+    try {
+      await adminDeleteEventKind(kind.slug);
+      if (kindEditor?.slug === kind.slug) setKindEditor(null);
+      setNotice(`Type "${kind.label_en}" deleted.`);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not delete the event type.');
     }
   };
 
@@ -229,11 +382,19 @@ export default function AdminEvents() {
       <PageHeader
         eyebrow="Event setup"
         title="Events & tickets"
-        subtitle="Two events share one booking engine. Edit their dates and copy here; edit prices, inclusions and capacity defaults per ticket."
+        subtitle="Every event shares one booking engine. Add an event here, set its tickets, then give it city dates in Schedules."
         actions={
-          <button onClick={() => void load()} className="btn btn-ghost btn-sm" disabled={loading}>
-            <RefreshCw size={14} className={loading ? 'animate-spin' : ''} /> Refresh
-          </button>
+          <>
+            <button onClick={() => void load()} className="btn btn-ghost btn-sm" disabled={loading}>
+              <RefreshCw size={14} className={loading ? 'animate-spin' : ''} /> Refresh
+            </button>
+            <Button
+              size="sm"
+              onClick={() => setEventEditor({ mode: 'new', event: null, draft: { ...blankEvent(), kind: activeKinds[0]?.slug ?? 'yatra' } })}
+            >
+              <Plus size={13} /> Add event
+            </Button>
+          </>
         }
       />
 
@@ -248,6 +409,93 @@ export default function AdminEvents() {
         </div>
       )}
 
+      <Panel className="mb-5 overflow-hidden">
+        <div className="flex flex-wrap items-start justify-between gap-3 px-5 py-4">
+          <div>
+            <h2 className="font-display text-lg text-ink">Event types</h2>
+            <p className="mt-0.5 max-w-2xl text-xs text-muted">
+              Yatra and Expo are only the start. Pick a type below to rename it, switch it off, or delete it — types
+              that run as a city route fill the yatra slot on the public page, single-venue types fill the expo slot.
+            </p>
+          </div>
+          <Button
+            tone="ghost"
+            size="sm"
+            onClick={() => setKindEditor({ slug: null, draft: { label_en: '', label_hi: '', layout: 'single', active: 1 } })}
+          >
+            <Plus size={13} /> New type
+          </Button>
+        </div>
+        <div className="flex flex-wrap gap-2 border-t border-line px-5 py-4">
+          {kinds.map((kind) => {
+            const open = kindEditor?.slug === kind.slug;
+            return (
+              <button
+                key={kind.slug}
+                type="button"
+                onClick={() =>
+                  setKindEditor(
+                    open
+                      ? null
+                      : {
+                          slug: kind.slug,
+                          draft: {
+                            label_en: kind.label_en,
+                            label_hi: kind.label_hi,
+                            layout: kind.layout,
+                            active: Number(kind.active),
+                          },
+                        },
+                  )
+                }
+                className={`flex flex-wrap items-center gap-2 rounded-xl border px-3 py-2 text-left transition-colors ${
+                  open ? 'border-saffron bg-sandal-2' : 'border-line bg-white hover:bg-sandal-2/60'
+                }`}
+              >
+                <span className="font-ui text-[0.8rem] font-semibold text-ink">
+                  {kind.label_en}
+                  <span className="ml-1.5 font-hindi text-muted">{kind.label_hi}</span>
+                </span>
+                <span className="font-ui text-[0.62rem] uppercase tracking-[0.1em] text-sky">
+                  {kind.layout === 'route' ? 'city route' : 'single venue'}
+                </span>
+                <span className="font-ui text-[0.62rem] text-muted">{kind.event_count} event(s)</span>
+                {!Number(kind.active) && (
+                  <span className="font-ui text-[0.62rem] uppercase tracking-[0.1em] text-error">Off</span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+        {kindEditor && (
+          <div className="border-t border-line px-5 pb-5">
+            <EventKindForm
+              initial={kindEditor.draft}
+              busy={kindBusy}
+              submitLabel={kindEditor.slug ? 'Save type' : 'Add type'}
+              onCancel={() => setKindEditor(null)}
+              onSubmit={(values) => void saveKind(values)}
+            />
+            {kindEditor.slug && (
+              <div className="mt-2 flex justify-end">
+                <Button
+                  tone="danger"
+                  size="sm"
+                  type="button"
+                  disabled={kindBusy}
+                  onClick={() => {
+                    const kind = kinds.find((item) => item.slug === kindEditor.slug);
+                    if (kind) void removeKind(kind);
+                  }}
+                >
+                  <Trash2 size={13} /> Delete type
+                </Button>
+              </div>
+            )}
+          </div>
+        )}
+      </Panel>
+
       {loading && events.length === 0 ? (
         <Panel>
           <Spinner label="Loading events" />
@@ -259,7 +507,7 @@ export default function AdminEvents() {
               <div className="flex flex-wrap items-start justify-between gap-3 border-b border-line bg-sandal-2/50 px-5 py-4">
                 <div className="min-w-0">
                   <div className="flex flex-wrap items-center gap-2">
-                    <span className="chip chip--lotus">{event.kind === 'expo' ? 'Expo' : 'Yatra'}</span>
+                    <span className="chip chip--lotus">{event.kind_label || event.kind}</span>
                     <span
                       className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 font-ui text-[0.62rem] font-semibold uppercase tracking-[0.1em] ${
                         Number(event.active)
@@ -281,7 +529,7 @@ export default function AdminEvents() {
                   <p className="mt-0.5 text-sm text-muted">{event.tagline_en}</p>
                 </div>
                 <div className="flex flex-wrap gap-2">
-                  <Button tone="ghost" size="sm" onClick={() => setEventEditor({ event, draft: emptyEvent(event) })}>
+                  <Button tone="ghost" size="sm" onClick={() => setEventEditor({ mode: 'edit', event, draft: { ...emptyEvent(event), kind: event.kind, slug: event.slug } })}>
                     <Pencil size={13} /> Edit event
                   </Button>
                   <Button
@@ -406,14 +654,20 @@ export default function AdminEvents() {
       <Modal
         open={Boolean(eventEditor)}
         onClose={() => setEventEditor(null)}
-        title={eventEditor ? `Edit ${eventEditor.event.name_en}` : 'Edit event'}
+        title={
+          eventEditor?.mode === 'new'
+            ? 'Add event'
+            : eventEditor?.event
+              ? `Edit ${eventEditor.event.name_en}`
+              : 'Edit event'
+        }
         subtitle="These details appear at the top of the public event page."
         wide
         footer={
           <div className="flex justify-end gap-2">
             <Button tone="ghost" onClick={() => setEventEditor(null)}>Cancel</Button>
             <Button onClick={() => void saveEvent()} disabled={saving}>
-              {saving ? 'Saving…' : 'Save event'}
+              {saving ? 'Saving…' : eventEditor?.mode === 'new' ? 'Create event' : 'Save event'}
             </Button>
           </div>
         }
@@ -421,6 +675,61 @@ export default function AdminEvents() {
         {eventEditor && (
           <div className="space-y-4">
             <div className="grid gap-3 sm:grid-cols-2">
+              {eventEditor.mode === 'new' && (
+                <>
+                  <div className="sm:col-span-2">
+                    <Field
+                      label="Event type"
+                      hint={
+                        selectedKind
+                          ? selectedKind.layout === 'route'
+                            ? `"${selectedKind.label_en}" shows one schedule per city along a route — visitors pick their own city.`
+                            : `"${selectedKind.label_en}" runs multi-day at a single venue.`
+                          : 'Types are managed here — add as many as you need.'
+                      }
+                    >
+                      <div className="flex gap-2">
+                        <Select
+                          value={eventEditor.draft.kind}
+                          onChange={(e) => patchEvent({ kind: e.target.value })}
+                          className="min-w-0 flex-1"
+                        >
+                          {kindOptions.map((kind) => (
+                            <option key={kind.slug} value={kind.slug}>
+                              {kind.label_en} · {kind.label_hi} — {kind.layout === 'route' ? 'city route' : 'single venue'}
+                            </option>
+                          ))}
+                        </Select>
+                        <Button
+                          tone="ghost"
+                          type="button"
+                          size="sm"
+                          className="shrink-0"
+                          disabled={kindBusy}
+                          onClick={() => setQuickKindOpen((open) => !open)}
+                        >
+                          <Plus size={13} /> New type
+                        </Button>
+                      </div>
+                      {quickKindOpen && (
+                        <EventKindForm
+                          busy={kindBusy}
+                          submitLabel="Add type"
+                          onCancel={() => setQuickKindOpen(false)}
+                          onSubmit={(values) => void saveKind(values)}
+                        />
+                      )}
+                    </Field>
+                  </div>
+                  <Field label="Page address (slug)" hint="Leave blank to build it from the English name.">
+                    <TextInput
+                      value={eventEditor.draft.slug}
+                      placeholder="mahi-sundarkand"
+                      onChange={(e) => patchEvent({ slug: e.target.value })}
+                    />
+                  </Field>
+                </>
+              )}
               <Field label="Name (English)">
                 <TextInput
                   value={eventEditor.draft.name_en}

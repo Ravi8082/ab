@@ -1,10 +1,13 @@
 import { Router } from 'express';
 import rateLimit from 'express-rate-limit';
 import bcrypt from 'bcryptjs';
+import path from 'node:path';
 import { randomInt } from 'node:crypto';
 import { z } from 'zod';
 import { query, withTransaction } from '../db.js';
-import { HttpError, asyncHandler, makeReference } from '../lib/util.js';
+import { HttpError, asyncHandler, makeQrToken, makeReference, slugify } from '../lib/util.js';
+import { csvCell } from '../lib/csv.js';
+import { strongPassword } from '../lib/passwords.js';
 import {
   audit,
   clearAdminCookie,
@@ -30,14 +33,20 @@ import {
   saveSalesSettings,
   smtpConfigured,
 } from '../lib/settings.js';
+import { getBrand, publicBrand, removeBrandImage, saveBrand, uploadBrandImage } from '../lib/brand.js';
 import { invalidateEventPageCache } from '../lib/pageCache.js';
-import { effectiveUnitPrice, priceSlabsByTicket } from '../lib/ticketPricing.js';
+import { effectiveUnitPrice, priceOnDate, priceSlabsByTicket } from '../lib/ticketPricing.js';
 import { runReminderSweep } from '../lib/reminders.js';
-import { activateBooking, loadBookingById, publicPass } from '../lib/eventBookings.js';
+import { activateBooking, bookingMapUrl, loadBookingById, publicPass, soldBySchedule } from '../lib/eventBookings.js';
 import { normalizeCode } from '../lib/offers.js';
-import { replaceAttendees } from '../lib/attendees.js';
+import { attendeeEmails, replaceAttendees } from '../lib/attendees.js';
 import { createBlock, listBlocks, setBlockActive } from '../lib/entryBlocks.js';
-import { sendStaffKycOtpEmail } from '../lib/mailer.js';
+import {
+  sendBookingNoticeEmail,
+  sendPassEmail,
+  sendStaffKycOtpEmail,
+  sendWaitlistAnnouncementEmail,
+} from '../lib/mailer.js';
 import {
   KYC_FILE_COLUMNS,
   maskIdNumber,
@@ -48,6 +57,9 @@ import {
 } from '../lib/staffKyc.js';
 
 export const adminRouter = Router();
+
+// A real bcrypt hash so a missing account costs the same time as a wrong password.
+const DUMMY_PASSWORD_HASH = '$2a$12$Pxpg1S/41FUOiVswJej/Ju3YELdYQVjJfc0WWdML7Muv6kEmlmJWe';
 
 const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -72,30 +84,29 @@ adminRouter.post(
     const email = parsed.data.email.toLowerCase();
     const [admin] = await query('SELECT * FROM admins WHERE email = ? LIMIT 1', [email]);
 
-    // Constant-ish response so a missing account is not distinguishable.
-    if (!admin) {
-      await bcrypt.compare(parsed.data.password, '$2a$12$invalidinvalidinvalidinvalidinvalidinvalidinvalidinv');
+    // Compare first so a disabled or locked account is not distinguishable from a wrong password.
+    const ok = await bcrypt.compare(
+      parsed.data.password,
+      admin?.password_hash || DUMMY_PASSWORD_HASH,
+    );
+    if (!admin || !ok) {
+      if (admin) {
+        const attempts = Number(admin.failed_attempts) + 1;
+        const lock = attempts >= 5 ? 'DATE_ADD(NOW(), INTERVAL 15 MINUTE)' : 'NULL';
+        await query(`UPDATE admins SET failed_attempts = ?, locked_until = ${lock} WHERE id = ?`, [attempts, admin.id]);
+        await audit({
+          actorType: 'admin',
+          actorId: admin.id,
+          action: 'admin.login.failed',
+          ip: clientIp(req),
+        });
+      }
       throw new HttpError(401, 'Invalid email or password.');
     }
 
     if (!Number(admin.active)) throw new HttpError(403, 'This account is disabled. Contact the owner.');
-
     if (admin.locked_until && new Date(admin.locked_until) > new Date()) {
       throw new HttpError(423, 'This account is temporarily locked. Try again in a few minutes.');
-    }
-
-    const ok = await bcrypt.compare(parsed.data.password, admin.password_hash);
-    if (!ok) {
-      const attempts = Number(admin.failed_attempts) + 1;
-      const lock = attempts >= 5 ? 'DATE_ADD(NOW(), INTERVAL 15 MINUTE)' : 'NULL';
-      await query(`UPDATE admins SET failed_attempts = ?, locked_until = ${lock} WHERE id = ?`, [attempts, admin.id]);
-      await audit({
-        actorType: 'admin',
-        actorId: admin.id,
-        action: 'admin.login.failed',
-        ip: clientIp(req),
-      });
-      throw new HttpError(401, 'Invalid email or password.');
     }
 
     await query(
@@ -106,10 +117,8 @@ adminRouter.post(
 
     const token = signAdminToken(admin);
     setAdminCookie(res, token);
-    res.json({
-      admin: { id: admin.id, email: admin.email, name: admin.name, role: admin.role },
-      token,
-    });
+    // The session lives in an httpOnly cookie only — never hand the JWT to page JS.
+    res.json({ admin: { id: admin.id, email: admin.email, name: admin.name, role: admin.role } });
   }),
 );
 
@@ -123,6 +132,71 @@ adminRouter.get(
   requireAdmin,
   asyncHandler(async (req, res) => {
     res.json({ admin: req.admin });
+  }),
+);
+
+const passwordLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many password attempts. Try again in 15 minutes.' },
+});
+
+const changePasswordSchema = z
+  .object({
+    currentPassword: z.string().min(1).max(200),
+    newPassword: strongPassword,
+  })
+  .refine((data) => data.newPassword !== data.currentPassword, {
+    message: 'Choose a password different from the current one.',
+    path: ['newPassword'],
+  });
+
+adminRouter.post(
+  '/me/password',
+  requireAdmin,
+  passwordLimiter,
+  asyncHandler(async (req, res) => {
+    const parsed = changePasswordSchema.safeParse(req.body);
+    if (!parsed.success) {
+      throw new HttpError(400, 'Enter your current password and a stronger new password.', {
+        ...parsed.error.flatten().fieldErrors,
+      });
+    }
+
+    const [admin] = await query('SELECT id, password_hash FROM admins WHERE id = ? AND active = 1 LIMIT 1', [
+      req.admin.id,
+    ]);
+    if (!admin) throw new HttpError(401, 'Your session is no longer valid. Sign in again.');
+
+    const ok = await bcrypt.compare(parsed.data.currentPassword, admin.password_hash);
+    if (!ok) throw new HttpError(400, 'The current password is incorrect.');
+
+    const hash = await bcrypt.hash(parsed.data.newPassword, 12);
+    await query(
+      'UPDATE admins SET password_hash = ?, failed_attempts = 0, locked_until = NULL, token_version = token_version + 1 WHERE id = ?',
+      [hash, admin.id],
+    );
+
+    // Keep this device signed in; every older cookie now fails the version check.
+    const [fresh] = await query(
+      'SELECT id, email, name, role, token_version FROM admins WHERE id = ? AND active = 1 LIMIT 1',
+      [admin.id],
+    );
+    setAdminCookie(res, signAdminToken(fresh));
+
+    await audit({
+      actorType: 'admin',
+      actorId: req.admin.id,
+      action: 'admin.password_changed',
+      entity: 'admin',
+      entityId: String(admin.id),
+      meta: { other_sessions_revoked: true },
+      ip: clientIp(req),
+    });
+
+    res.json({ ok: true });
   }),
 );
 
@@ -215,6 +289,77 @@ adminRouter.put(
       ip: clientIp(req),
     });
     res.json({ settings });
+  }),
+);
+
+adminRouter.get(
+  '/settings/brand',
+  asyncHandler(async (_req, res) => {
+    res.json({ brand: publicBrand(await getBrand({ fresh: true })) });
+  }),
+);
+
+const brandSchema = z.object({
+  name_en: z.string().trim().min(2).max(60),
+  name_hi: z.string().trim().min(2).max(60),
+  tagline_en: z.string().trim().max(90),
+  tagline_hi: z.string().trim().max(90),
+});
+
+adminRouter.put(
+  '/settings/brand',
+  asyncHandler(async (req, res) => {
+    const parsed = brandSchema.safeParse(req.body);
+    if (!parsed.success) throw new HttpError(400, 'Please check the branding details.', parsed.error.flatten().fieldErrors);
+    const brand = await saveBrand(parsed.data, req.admin.id);
+    await audit({
+      actorType: 'admin',
+      actorId: req.admin.id,
+      action: 'event.brand.updated',
+      entity: 'app_settings',
+      entityId: 'brand',
+      meta: { name_en: brand.name_en, name_hi: brand.name_hi },
+      ip: clientIp(req),
+    });
+    res.json({ brand: publicBrand(brand) });
+  }),
+);
+
+adminRouter.post(
+  '/settings/brand/image',
+  asyncHandler(async (req, res) => {
+    const field = z.enum(['logo', 'favicon']).safeParse(req.body?.field);
+    if (!field.success) throw new HttpError(400, 'Choose either the logo or the favicon.');
+    const brand = await uploadBrandImage(field.data, req.body?.file, req.admin.id);
+    await audit({
+      actorType: 'admin',
+      actorId: req.admin.id,
+      action: 'event.brand.image',
+      entity: 'app_settings',
+      entityId: 'brand',
+      meta: { field: field.data, size: brand[field.data]?.size ?? 0 },
+      ip: clientIp(req),
+    });
+    res.json({ brand: publicBrand(brand) });
+  }),
+);
+
+adminRouter.delete(
+  '/settings/brand/image/:field',
+  asyncHandler(async (req, res) => {
+    const field = z.enum(['logo', 'favicon']).safeParse(req.params.field);
+    if (!field.success) throw new HttpError(400, 'Choose either the logo or the favicon.');
+    const brand = await removeBrandImage(field.data, req.admin.id);
+    await audit({
+      actorType: 'admin',
+      actorId: req.admin.id,
+      action: 'event.brand.image_removed',
+      entity: 'app_settings',
+      entityId: 'brand',
+      meta: { field: field.data },
+      ip: clientIp(req),
+    });
+    res.json({ brand: publicBrand(brand) });
   }),
 );
 
@@ -344,10 +489,82 @@ adminRouter.get(
   }),
 );
 
+const AUDIT_ACTOR_TYPES = ['admin', 'system', 'public'];
+
+adminRouter.get(
+  '/audit',
+  asyncHandler(async (req, res) => {
+    const page = Math.max(1, Number(req.query.page) || 1);
+    const pageSize = Math.min(100, Math.max(10, Number(req.query.pageSize) || 25));
+    const action = typeof req.query.action === 'string' ? req.query.action.trim() : '';
+    const actorType = AUDIT_ACTOR_TYPES.includes(req.query.actorType) ? req.query.actorType : null;
+    const entity = typeof req.query.entity === 'string' ? req.query.entity.trim() : '';
+    const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+    const datePattern = /^\d{4}-\d{2}-\d{2}$/;
+    const from = datePattern.test(req.query.from || '') ? req.query.from : null;
+    const to = datePattern.test(req.query.to || '') ? req.query.to : null;
+
+    const where = [];
+    const params = [];
+    if (action) {
+      where.push('a.action LIKE ?');
+      params.push(`${action}%`);
+    }
+    if (actorType) {
+      where.push('a.actor_type = ?');
+      params.push(actorType);
+    }
+    if (entity) {
+      where.push('a.entity = ?');
+      params.push(entity);
+    }
+    if (q) {
+      where.push('(a.action LIKE ? OR a.entity LIKE ? OR a.entity_id LIKE ? OR a.ip LIKE ? OR ad.name LIKE ? OR ad.email LIKE ?)');
+      const like = `%${q}%`;
+      params.push(like, like, like, like, like, like);
+    }
+    if (from) {
+      where.push('a.created_at >= ?');
+      params.push(`${from} 00:00:00`);
+    }
+    if (to) {
+      where.push('a.created_at < DATE_ADD(?, INTERVAL 1 DAY)');
+      params.push(to);
+    }
+    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+
+    const [entries, totals, actionRows, entityRows] = await Promise.all([
+      query(
+        `SELECT a.id, a.actor_type, a.actor_id, a.action, a.entity, a.entity_id, a.meta, a.ip, a.created_at,
+                ad.name AS actor_name, ad.email AS actor_email
+         FROM audit_log a LEFT JOIN admins ad ON ad.id = a.actor_id
+         ${whereSql}
+         ORDER BY a.id DESC LIMIT ? OFFSET ?`,
+        [...params, pageSize, (page - 1) * pageSize],
+      ),
+      query(
+        `SELECT COUNT(*) AS total FROM audit_log a LEFT JOIN admins ad ON ad.id = a.actor_id ${whereSql}`,
+        params,
+      ),
+      query('SELECT DISTINCT action FROM audit_log ORDER BY action'),
+      query('SELECT DISTINCT entity FROM audit_log WHERE entity IS NOT NULL ORDER BY entity'),
+    ]);
+
+    res.json({
+      entries,
+      total: Number(totals[0]?.total || 0),
+      page,
+      pageSize,
+      actions: actionRows.map((row) => row.action),
+      entities: entityRows.map((row) => row.entity),
+    });
+  }),
+);
+
 adminRouter.get(
   '/overview',
   asyncHandler(async (_req, res) => {
-    const [[totals], byState, byTicket, byEvent, recent] = await Promise.all([
+    const [[totals], byState, byTicket, byEvent, recent, kindRows] = await Promise.all([
       query(
         `SELECT COUNT(*) AS bookings,
                 COALESCE(SUM(CASE WHEN status = 'paid' THEN qty ELSE 0 END), 0) AS seats,
@@ -401,7 +618,15 @@ adminRouter.get(
          JOIN event_ticket_types tt ON tt.id = b.ticket_type_id
          ORDER BY b.id DESC LIMIT 8`,
       ),
+      query('SELECT slug, label_en, label_hi FROM event_kinds'),
     ]);
+
+    const kindLabels = new Map(kindRows.map((kind) => [kind.slug, kind]));
+    const withKindLabel = (row) => ({
+      ...row,
+      kind_label: kindLabels.get(row.kind)?.label_en ?? row.kind,
+      kind_label_hi: kindLabels.get(row.kind)?.label_hi ?? row.kind,
+    });
 
     res.json({
       totals: {
@@ -418,12 +643,12 @@ adminRouter.get(
         revenue: Number(row.revenue),
       })),
       byTicket: byTicket.map((row) => ({
-        ...row,
+        ...withKindLabel(row),
         capacity: Number(row.capacity),
         sold: Number(row.sold),
         left: Math.max(0, Number(row.capacity) - Number(row.sold)),
       })),
-      byEvent,
+      byEvent: byEvent.map(withKindLabel),
       recent,
     });
   }),
@@ -473,19 +698,144 @@ adminRouter.put(
 adminRouter.get(
   '/events',
   asyncHandler(async (_req, res) => {
-    const [events, tickets, slabsByTicket] = await Promise.all([
+    const [events, tickets, slabsByTicket, kindRows] = await Promise.all([
       query('SELECT * FROM events ORDER BY sort_order, id'),
       query('SELECT * FROM event_ticket_types ORDER BY event_id, sort_order, id'),
       priceSlabsByTicket(),
+      query('SELECT slug, label_en, label_hi, layout FROM event_kinds'),
     ]);
+    const kinds = new Map(kindRows.map((kind) => [kind.slug, kind]));
     res.json({
       events: events.map((event) => ({
         ...event,
+        kind_label: kinds.get(event.kind)?.label_en ?? event.kind,
+        kind_label_hi: kinds.get(event.kind)?.label_hi ?? event.kind,
+        kind_layout: kinds.get(event.kind)?.layout ?? (event.kind === 'expo' ? 'single' : 'route'),
         tickets: tickets
           .filter((ticket) => ticket.event_id === event.id)
           .map((ticket) => ({ ...ticket, price_slabs: slabsByTicket.get(ticket.id) || [] })),
       })),
     });
+  }),
+);
+
+/* ----------------------------- Event types ----------------------------- */
+
+const eventKindSchema = z.object({
+  label_en: z.string().trim().min(2).max(60),
+  label_hi: z.string().trim().min(1).max(80),
+  layout: z.enum(['route', 'single']).default('route'),
+  slug: z.string().trim().max(32).optional().or(z.literal('')),
+  sort_order: z.coerce.number().int().min(0).max(9999).default(0),
+  active: z.coerce.number().int().min(0).max(1).default(1),
+});
+
+async function kindInUseCount(slug) {
+  const [row] = await query('SELECT COUNT(*) AS n FROM events WHERE kind = ?', [slug]);
+  return Number(row.n);
+}
+
+adminRouter.get(
+  '/event-kinds',
+  asyncHandler(async (_req, res) => {
+    const kinds = await query('SELECT * FROM event_kinds ORDER BY sort_order, slug');
+    const usage = await query('SELECT kind, COUNT(*) AS n FROM events GROUP BY kind');
+    const byKind = new Map(usage.map((row) => [row.kind, Number(row.n)]));
+    res.json({ kinds: kinds.map((kind) => ({ ...kind, event_count: byKind.get(kind.slug) ?? 0 })) });
+  }),
+);
+
+adminRouter.post(
+  '/event-kinds',
+  asyncHandler(async (req, res) => {
+    const parsed = eventKindSchema.safeParse(req.body);
+    if (!parsed.success) throw new HttpError(400, 'Check the event type fields.', parsed.error.flatten().fieldErrors);
+    const d = parsed.data;
+
+    const base = slugify(d.slug || d.label_en, 'type');
+    if (!base) throw new HttpError(400, 'Give the type a name that can be used as an address.');
+    let slug = base;
+    for (let attempt = 2; ; attempt += 1) {
+      const [taken] = await query('SELECT slug FROM event_kinds WHERE slug = ? LIMIT 1', [slug]);
+      if (!taken) break;
+      slug = `${base.slice(0, 26)}-${attempt}`;
+    }
+
+    await query(
+      `INSERT INTO event_kinds (slug, label_en, label_hi, layout, sort_order, active)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [slug, d.label_en, d.label_hi, d.layout, d.sort_order, d.active],
+    );
+    await audit({
+      actorType: 'admin',
+      actorId: req.admin.id,
+      action: 'event_kind.created',
+      entity: 'event_kind',
+      entityId: slug,
+      meta: { label_en: d.label_en, layout: d.layout },
+      ip: clientIp(req),
+    });
+    invalidateEventPageCache();
+    res.status(201).json({ slug });
+  }),
+);
+
+adminRouter.put(
+  '/event-kinds/:slug',
+  asyncHandler(async (req, res) => {
+    const parsed = eventKindSchema.safeParse({ ...req.body, slug: req.params.slug });
+    if (!parsed.success) throw new HttpError(400, 'Check the event type fields.', parsed.error.flatten().fieldErrors);
+    const d = parsed.data;
+
+    const [existing] = await query('SELECT slug, sort_order FROM event_kinds WHERE slug = ? LIMIT 1', [req.params.slug]);
+    if (!existing) throw new HttpError(404, 'Event type not found.');
+
+    // The edit form does not carry sort_order, so an omitted value must not send the type to the top.
+    const sortOrder =
+      req.body?.sort_order === undefined || req.body?.sort_order === null || req.body?.sort_order === ''
+        ? Number(existing.sort_order)
+        : d.sort_order;
+
+    await query(
+      `UPDATE event_kinds SET label_en = ?, label_hi = ?, layout = ?, sort_order = ?, active = ? WHERE slug = ?`,
+      [d.label_en, d.label_hi, d.layout, sortOrder, d.active, req.params.slug],
+    );
+    await audit({
+      actorType: 'admin',
+      actorId: req.admin.id,
+      action: 'event_kind.updated',
+      entity: 'event_kind',
+      entityId: req.params.slug,
+      meta: { label_en: d.label_en, layout: d.layout },
+      ip: clientIp(req),
+    });
+    invalidateEventPageCache();
+    res.json({ ok: true });
+  }),
+);
+
+adminRouter.delete(
+  '/event-kinds/:slug',
+  asyncHandler(async (req, res) => {
+    const [existing] = await query('SELECT slug FROM event_kinds WHERE slug = ? LIMIT 1', [req.params.slug]);
+    if (!existing) throw new HttpError(404, 'Event type not found.');
+
+    const used = await kindInUseCount(req.params.slug);
+    if (used > 0) {
+      throw new HttpError(409, `${used} event${used === 1 ? '' : 's'} still uses this type — move them first.`);
+    }
+
+    await query('DELETE FROM event_kinds WHERE slug = ?', [req.params.slug]);
+    await audit({
+      actorType: 'admin',
+      actorId: req.admin.id,
+      action: 'event_kind.deleted',
+      entity: 'event_kind',
+      entityId: req.params.slug,
+      ip: clientIp(req),
+    });
+    invalidateEventPageCache();
+    res.json({ ok: true });
   }),
 );
 
@@ -520,6 +870,57 @@ function toDateTime(value) {
   }
   return text.length === 16 ? `${text}:00` : text;
 }
+
+const eventCreateSchema = eventSchema.extend({
+  kind: z.string().trim().toLowerCase().max(32).default('yatra'),
+  slug: z.string().trim().max(64).optional().or(z.literal('')),
+});
+
+adminRouter.post(
+  '/events',
+  asyncHandler(async (req, res) => {
+    const parsed = eventCreateSchema.safeParse(req.body);
+    if (!parsed.success) throw new HttpError(400, 'Check the event fields.', parsed.error.flatten().fieldErrors);
+    const d = parsed.data;
+
+    const [kindRow] = await query('SELECT slug FROM event_kinds WHERE slug = ? AND active = 1 LIMIT 1', [d.kind]);
+    if (!kindRow) throw new HttpError(400, 'Choose an event type that is turned on.');
+
+    const base = slugify(d.slug || d.name_en, 'event');
+    let slug = base;
+    for (let attempt = 2; ; attempt += 1) {
+      const [taken] = await query('SELECT id FROM events WHERE slug = ? LIMIT 1', [slug]);
+      if (!taken) break;
+      slug = `${base.slice(0, 52)}-${attempt}`;
+    }
+
+    const [last] = await query('SELECT COALESCE(MAX(sort_order), 0) AS sort FROM events');
+    const result = await query(
+      `INSERT INTO events
+        (slug, kind, name_en, name_hi, tagline_en, tagline_hi, description_en, description_hi,
+         date_label_en, date_label_hi, starts_on, ends_on, sale_ends_at, active, sort_order)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        slug, d.kind, d.name_en, d.name_hi, d.tagline_en, d.tagline_hi,
+        d.description_en || null, d.description_hi || null,
+        d.date_label_en, d.date_label_hi, d.starts_on || null, d.ends_on || null,
+        toDateTime(d.sale_ends_at), d.active, Number(last.sort) + 1,
+      ],
+    );
+
+    await audit({
+      actorType: 'admin',
+      actorId: req.admin.id,
+      action: 'event.created',
+      entity: 'event',
+      entityId: String(result.insertId),
+      meta: { slug, kind: d.kind },
+      ip: clientIp(req),
+    });
+    invalidateEventPageCache();
+    res.status(201).json({ id: result.insertId, slug });
+  }),
+);
 
 adminRouter.put(
   '/events/:id',
@@ -1162,7 +1563,13 @@ adminRouter.post(
   asyncHandler(async (req, res) => {
     const code = String(req.body?.code || req.body?.token || '').trim();
     const gate = req.body?.gate ? String(req.body.gate) : undefined;
-    const result = await checkInBooking({ code, actor: req.admin, ip: clientIp(req), gate });
+    const result = await checkInBooking({
+      code,
+      actor: req.admin,
+      ip: clientIp(req),
+      gate,
+      positions: Array.isArray(req.body?.positions) ? req.body.positions : undefined,
+    });
     res.json(result);
   }),
 );
@@ -1240,6 +1647,131 @@ adminRouter.get(
       ),
     ]);
     res.json({ waitlist: rows, byState: counts });
+  }),
+);
+
+adminRouter.get(
+  '/waitlist/export.csv',
+  asyncHandler(async (req, res) => {
+    const stateId = req.query.state_id ? Number(req.query.state_id) : null;
+    const status = ['pending', 'verified'].includes(req.query.status) ? req.query.status : null;
+    const where = [];
+    const params = [];
+    if (stateId) {
+      where.push('w.state_id = ?');
+      params.push(stateId);
+    }
+    if (status) {
+      where.push('w.status = ?');
+      params.push(status);
+    }
+    const rows = await query(
+      `SELECT w.ref, s.name_en AS state_en, s.code AS state_code, w.name, w.email, w.phone,
+              w.status, w.verified_at, w.created_at
+       FROM event_state_waitlist w JOIN event_states s ON s.id = w.state_id
+       ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+       ORDER BY s.name_en ASC, w.id DESC`,
+      params,
+    );
+    const lines = [
+      ['Reference', 'State', 'State code', 'Name', 'Email', 'Phone', 'Status', 'Verified at', 'Joined at'],
+      ...rows.map((row) => [
+        row.ref,
+        row.state_en,
+        row.state_code,
+        row.name,
+        row.email,
+        row.phone || '',
+        row.status,
+        row.verified_at ? new Date(row.verified_at).toISOString() : '',
+        row.created_at ? new Date(row.created_at).toISOString() : '',
+      ]),
+    ];
+    const stamp = new Date().toISOString().slice(0, 10);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="adhyatmik-waitlist-${stamp}.csv"`);
+    res.send(`\uFEFF${lines.map((line) => line.map(csvCell).join(',')).join('\r\n')}`);
+  }),
+);
+
+const waitlistMessageLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many waitlist broadcasts. Wait a few minutes before sending another.' },
+});
+
+const waitlistMessageSchema = z.object({
+  stateId: z.union([z.coerce.number().int().positive(), z.null()]).optional(),
+  subject: z.string().trim().min(3, 'Write a subject of at least 3 characters.').max(120),
+  message: z.string().trim().min(10, 'Write a message of at least 10 characters.').max(4000),
+});
+
+adminRouter.post(
+  '/waitlist/message',
+  waitlistMessageLimiter,
+  asyncHandler(async (req, res) => {
+    const parsed = waitlistMessageSchema.safeParse(req.body);
+    if (!parsed.success) throw new HttpError(400, parsed.error.issues[0]?.message || 'Check the subject and message.');
+    const { stateId = null, subject, message } = parsed.data;
+
+    const rows = await query(
+      `SELECT w.id, w.ref, w.name, w.email, s.name_en AS state_en
+       FROM event_state_waitlist w JOIN event_states s ON s.id = w.state_id
+       WHERE w.status = 'verified' ${stateId ? 'AND w.state_id = ?' : ''}
+       ORDER BY w.id ASC LIMIT 500`,
+      stateId ? [stateId] : [],
+    );
+
+    const seen = new Set();
+    const recipients = [];
+    for (const row of rows) {
+      const email = String(row.email).toLowerCase();
+      if (seen.has(email)) continue;
+      seen.add(email);
+      recipients.push(row);
+    }
+    if (recipients.length === 0) {
+      throw new HttpError(400, 'No verified waitlist emails match this selection yet.');
+    }
+
+    let sent = 0;
+    let logged = 0;
+    let failed = 0;
+    for (const recipient of recipients) {
+      try {
+        const result = await sendWaitlistAnnouncementEmail({
+          to: recipient.email,
+          name: recipient.name,
+          stateName: recipient.state_en,
+          subject,
+          message,
+          waitlistRef: recipient.ref,
+        });
+        if (result.delivered) sent += 1;
+        else logged += 1;
+      } catch {
+        failed += 1;
+      }
+    }
+
+    await audit({
+      actorType: 'admin',
+      actorId: req.admin.id,
+      action: 'event.waitlist.messaged',
+      entity: 'event_state_waitlist',
+      meta: { stateId, subject, recipients: recipients.length, sent, logged, failed },
+      ip: clientIp(req),
+    });
+
+    res.json({
+      recipients: recipients.length,
+      sent,
+      logged,
+      failed,
+      emailConfigured: smtpConfigured(),
+    });
   }),
 );
 
@@ -1341,11 +1873,11 @@ adminRouter.get(
 const staffSchema = z.object({
   name: z.string().trim().min(2).max(120),
   email: z.string().trim().email().max(190),
-  password: z.string().min(8).max(200),
+  password: strongPassword,
 });
 
 const passwordSchema = z.object({
-  password: z.string().min(8).max(200),
+  password: strongPassword,
 });
 
 adminRouter.post(
@@ -1353,7 +1885,9 @@ adminRouter.post(
   asyncHandler(async (req, res) => {
     const parsed = staffSchema.safeParse(req.body);
     if (!parsed.success) {
-      throw new HttpError(400, 'Enter a name, valid email and a password of at least 8 characters.');
+      throw new HttpError(400, 'Enter a name, a valid email and a strong password.', {
+        ...parsed.error.flatten().fieldErrors,
+      });
     }
     const email = parsed.data.email.toLowerCase();
     const [existing] = await query('SELECT id FROM admins WHERE email = ? LIMIT 1', [email]);
@@ -1384,7 +1918,12 @@ adminRouter.patch(
     const sets = [];
     const params = [];
     if (name) { sets.push('name = ?'); params.push(name); }
-    if (active === 0 || active === 1) { sets.push('active = ?'); params.push(active); }
+    if (active === 0) {
+      sets.push('active = 0', 'token_version = token_version + 1');
+    } else if (active === 1) {
+      sets.push('active = ?');
+      params.push(active);
+    }
     if (!sets.length) throw new HttpError(400, 'Nothing to update.');
 
     const result = await query(
@@ -1410,10 +1949,14 @@ adminRouter.post(
   '/staff/:id/password',
   asyncHandler(async (req, res) => {
     const parsed = passwordSchema.safeParse(req.body);
-    if (!parsed.success) throw new HttpError(400, 'The password must be at least 8 characters.');
+    if (!parsed.success) throw new HttpError(400, 'That password is not strong enough.', {
+      ...parsed.error.flatten().fieldErrors,
+    });
     const hash = await bcrypt.hash(parsed.data.password, 12);
     const result = await query(
-      `UPDATE admins SET password_hash = ?, failed_attempts = 0, locked_until = NULL WHERE id = ? AND role = 'staff'`,
+      `UPDATE admins SET password_hash = ?, failed_attempts = 0, locked_until = NULL,
+              token_version = token_version + 1
+       WHERE id = ? AND role = 'staff'`,
       [hash, req.params.id],
     );
     if (result.affectedRows === 0) throw new HttpError(404, 'Staff account not found.');
@@ -1463,7 +2006,9 @@ adminRouter.delete(
       return res.json({ ok: true, purged: true });
     }
 
-    await query(`UPDATE admins SET active = 0 WHERE id = ? AND role = 'staff'`, [staff.id]);
+    await query(`UPDATE admins SET active = 0, token_version = token_version + 1 WHERE id = ? AND role = 'staff'`, [
+      staff.id,
+    ]);
     await audit({
       actorType: 'admin',
       actorId: req.admin.id,
@@ -1675,7 +2220,7 @@ adminRouter.get(
     if (!column) throw new HttpError(404, 'Unknown document type.');
 
     const [row] = await query(
-      `SELECT k.${column} AS path, a.email FROM staff_kyc k
+      `SELECT k.${column} AS path, k.admin_id AS staff_id, a.email FROM staff_kyc k
        JOIN admins a ON a.id = k.admin_id
        WHERE k.admin_id = ? AND a.role = 'staff' LIMIT 1`,
       [req.params.id],
@@ -1693,7 +2238,14 @@ adminRouter.get(
       ip: clientIp(req),
     });
 
+    // KYC documents are personal data: never cached, never rendered inline by the browser.
     res.setHeader('Cache-Control', 'private, no-store');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox");
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="staff-${Number(row.staff_id)}-${kind}.${path.extname(absolute).slice(1)}"`,
+    );
     res.sendFile(absolute);
   }),
 );
@@ -2296,6 +2848,661 @@ adminRouter.patch(
 
     const row = await loadBookingById(booking.id);
     res.json({ pass: publicPass(row) });
+  }),
+);
+
+/* ------------------------------- Pass resend ------------------------------- */
+
+const resendPassSchema = z.object({
+  email: z.string().trim().email().max(190).optional(),
+});
+
+adminRouter.post(
+  '/bookings/:id/resend',
+  asyncHandler(async (req, res) => {
+    const parsed = resendPassSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      throw new HttpError(400, 'Enter the corrected email address, or leave it blank to use the booking email.');
+    }
+
+    const row = await loadBookingById(req.params.id);
+    if (!row) throw new HttpError(404, 'Booking not found.');
+    if (row.status !== 'paid') {
+      throw new HttpError(409, 'Only a paid pass can be resent. Issue a new pass if this booking was cancelled.');
+    }
+
+    const pass = publicPass(row);
+    const to = parsed.data.email ? parsed.data.email.toLowerCase() : row.email;
+    const delivery = await sendPassEmail({
+      to,
+      name: row.name,
+      reference: row.reference,
+      eventName: row.event_name_en,
+      ticketName: row.ticket_name_en,
+      venue: row.venue_name_en,
+      address: row.address_en,
+      city: row.city_name_en,
+      state: row.state_name_en,
+      dateLabel: row.date_label_en,
+      mapUrl: bookingMapUrl(row),
+      qty: Number(row.qty),
+      amount: Number(row.amount),
+      qrToken: row.qr_token,
+      passDays: pass.passDays,
+      attendees: pass.attendees,
+      bookingId: row.id,
+    });
+
+    if (delivery.delivered) {
+      await query('UPDATE event_bookings SET pass_sent_at = NOW() WHERE id = ?', [row.id]);
+    }
+    await audit({
+      actorType: 'admin',
+      actorId: req.admin.id,
+      action: 'event.pass.resent',
+      entity: 'event_booking',
+      entityId: String(row.id),
+      meta: { reference: row.reference, to, delivered: delivery.delivered },
+      ip: clientIp(req),
+    });
+
+    res.json({
+      delivered: delivery.delivered,
+      to,
+      emailConfigured: smtpConfigured(),
+      pass: publicPass(await loadBookingById(row.id)),
+    });
+  }),
+);
+
+/* ------------------------------ Booking changes ------------------------------ */
+
+adminRouter.get(
+  '/bookings/:id/amend-options',
+  asyncHandler(async (req, res) => {
+    const row = await loadBookingById(req.params.id);
+    if (!row) throw new HttpError(404, 'Booking not found.');
+    if (row.status !== 'paid') throw new HttpError(409, 'Only a paid pass can be changed.');
+    if (Number(row.check_in_count) > 0) {
+      throw new HttpError(409, 'This pass has already been scanned at the gate, so it can no longer be changed.');
+    }
+
+    const [schedules, tickets, capacityRows] = await Promise.all([
+      query(
+        `SELECT s.id, s.event_date, s.end_date, s.start_time, s.end_time,
+                DATEDIFF(COALESCE(s.end_date, s.event_date), s.event_date) + 1 AS schedule_days,
+                st.name_en AS state_en, c.name_en AS city_en, v.name_en AS venue_en
+         FROM event_schedules s
+         JOIN event_states st ON st.id = s.state_id
+         JOIN event_cities c ON c.id = s.city_id
+         JOIN event_venues v ON v.id = s.venue_id
+         WHERE s.event_id = ? AND s.active = 1
+         ORDER BY s.event_date, c.name_en`,
+        [row.event_id],
+      ),
+      query(
+        `SELECT id, name_en, name_hi, price, original_price, valid_days
+         FROM event_ticket_types WHERE event_id = ? AND active = 1 ORDER BY sort_order, id`,
+        [row.event_id],
+      ),
+      query(
+        `SELECT c.schedule_id, c.ticket_type_id, c.capacity
+         FROM event_schedule_capacities c
+         JOIN event_schedules s ON s.id = c.schedule_id
+         WHERE s.event_id = ? AND s.active = 1`,
+        [row.event_id],
+      ),
+    ]);
+
+    const [sold, slabs] = await Promise.all([soldBySchedule(), priceSlabsByTicket()]);
+    const ticketById = new Map(tickets.map((ticket) => [ticket.id, ticket]));
+
+    const scheduleOptions = schedules
+      .map((schedule) => {
+        const options = capacityRows
+          .filter((capacity) => Number(capacity.schedule_id) === Number(schedule.id))
+          .map((capacity) => {
+            const ticket = ticketById.get(Number(capacity.ticket_type_id));
+            if (!ticket) return null;
+            const pricing = priceOnDate(ticket, slabs.get(ticket.id) ?? []);
+            let left =
+              Number(capacity.capacity) - (sold.get(`${schedule.id}:${ticket.id}`) ?? 0);
+            // The booking's own seats already count as sold when it is looking at its current option.
+            if (Number(schedule.id) === Number(row.schedule_id) && Number(ticket.id) === Number(row.ticket_type_id)) {
+              left += Number(row.qty);
+            }
+            const scheduleDays = Math.max(1, Number(schedule.schedule_days) || 1);
+            const passDays = Math.max(1, Math.min(Number(ticket.valid_days) || 1, scheduleDays));
+            return {
+              ticketTypeId: Number(ticket.id),
+              name_en: ticket.name_en,
+              name_hi: ticket.name_hi,
+              price: pricing.price,
+              listPrice: pricing.list_price,
+              left: Math.max(0, left),
+              validDays: Number(ticket.valid_days) || 1,
+              passDays,
+            };
+          })
+          .filter(Boolean);
+        return {
+          scheduleId: Number(schedule.id),
+          eventDate: schedule.event_date,
+          endDate: schedule.end_date,
+          startTime: schedule.start_time,
+          endTime: schedule.end_time,
+          state_en: schedule.state_en,
+          city_en: schedule.city_en,
+          venue_en: schedule.venue_en,
+          tickets: options,
+        };
+      })
+      .filter((schedule) => schedule.tickets.length > 0);
+
+    res.json({
+      booking: {
+        id: Number(row.id),
+        reference: row.reference,
+        scheduleId: Number(row.schedule_id),
+        ticketTypeId: Number(row.ticket_type_id),
+        qty: Number(row.qty),
+        amount: Number(row.amount),
+        grossAmount: Number(row.gross_amount ?? Number(row.unit_price) * Number(row.qty)),
+        discountAmount: Number(row.discount_amount || 0),
+        attendees: publicPass(row).attendees,
+      },
+      schedules: scheduleOptions,
+    });
+  }),
+);
+
+const amendBookingSchema = z.object({
+  scheduleId: z.coerce.number().int().positive(),
+  ticketTypeId: z.coerce.number().int().positive(),
+  qty: z.coerce.number().int().min(1).max(20),
+  reason: z.string().trim().min(3).max(255),
+  paymentReference: z.string().trim().max(120).optional(),
+  attendees: z.array(issueAttendeeSchema).max(19).default([]),
+});
+
+adminRouter.post(
+  '/bookings/:id/amend',
+  asyncHandler(async (req, res) => {
+    const parsed = amendBookingSchema.safeParse(req.body);
+    if (!parsed.success) {
+      throw new HttpError(400, 'Please check the changed pass details.', parsed.error.flatten().fieldErrors);
+    }
+    const input = parsed.data;
+
+    const booking = await loadBookingById(req.params.id);
+    if (!booking) throw new HttpError(404, 'Booking not found.');
+    if (booking.status !== 'paid') throw new HttpError(409, 'Only a paid pass can be changed.');
+    if (Number(booking.check_in_count) > 0) {
+      throw new HttpError(409, 'This pass has already been scanned at the gate, so it can no longer be changed.');
+    }
+
+    const [schedule] = await query(
+      `SELECT s.*, DATEDIFF(COALESCE(s.end_date, s.event_date), s.event_date) + 1 AS schedule_days,
+              e.active AS event_active
+       FROM event_schedules s JOIN events e ON e.id = s.event_id
+       WHERE s.id = ? LIMIT 1`,
+      [input.scheduleId],
+    );
+    if (!schedule || !Number(schedule.active) || !Number(schedule.event_active)) {
+      throw new HttpError(404, 'That city and date are no longer available.');
+    }
+    if (Number(schedule.event_id) !== Number(booking.event_id)) {
+      throw new HttpError(400, 'Choose a city and date from the same event.');
+    }
+
+    const [ticket] = await query(
+      'SELECT * FROM event_ticket_types WHERE id = ? AND event_id = ? AND active = 1 LIMIT 1',
+      [input.ticketTypeId, booking.event_id],
+    );
+    if (!ticket) throw new HttpError(400, 'Choose a valid ticket type for this event.');
+
+    const extra = input.qty - 1;
+    if (input.attendees.length !== extra) {
+      throw new HttpError(400, 'Name and mobile number are needed for every person after the first.', {
+        attendees: extra === 0 ? 'Remove the extra attendees.' : `Add ${extra} more attendee detail(s).`,
+      });
+    }
+
+    const outcome = await withTransaction(async (conn) => {
+      const [lockedRows] = await conn.execute(
+        'SELECT status FROM event_bookings WHERE id = ? FOR UPDATE',
+        [booking.id],
+      );
+      if (!lockedRows[0] || lockedRows[0].status !== 'paid') {
+        throw new HttpError(409, 'This booking changed status. Refresh the list and try again.');
+      }
+      const [usedRows] = await conn.execute(
+        'SELECT COUNT(*) AS n FROM event_booking_checkins WHERE booking_id = ?',
+        [booking.id],
+      );
+      if (Number(usedRows[0].n) > 0) {
+        throw new HttpError(409, 'This pass has already been used at the gate, so it can no longer be changed.');
+      }
+
+      const [capacityRows] = await conn.execute(
+        'SELECT capacity FROM event_schedule_capacities WHERE schedule_id = ? AND ticket_type_id = ? FOR UPDATE',
+        [schedule.id, ticket.id],
+      );
+      if (!capacityRows[0]) throw new HttpError(409, 'This ticket is not open for the chosen city.');
+      const [soldRows] = await conn.execute(
+        `SELECT COALESCE(SUM(qty), 0) AS sold FROM event_bookings
+         WHERE schedule_id = ? AND ticket_type_id = ?
+           AND (status = 'paid' OR (status = 'pending' AND created_at > NOW() - INTERVAL 30 MINUTE))`,
+        [schedule.id, ticket.id],
+      );
+      let left = Number(capacityRows[0].capacity) - Number(soldRows[0].sold);
+      const sameSlot =
+        Number(schedule.id) === Number(booking.schedule_id) &&
+        Number(ticket.id) === Number(booking.ticket_type_id);
+      if (sameSlot) left += Number(booking.qty);
+      if (left < input.qty) {
+        throw new HttpError(409, left > 0 ? `Only ${left} seat(s) left for that ticket.` : 'That ticket is sold out.');
+      }
+
+      const pricing = await effectiveUnitPrice(conn, ticket);
+      const newGross = pricing.price * input.qty;
+      const discount = Math.min(Number(booking.discount_amount || 0), newGross);
+      const newAmount = newGross - discount;
+      const oldAmount = Number(booking.amount);
+      const delta = newAmount - oldAmount;
+
+      if (delta > 0 && !input.paymentReference) {
+        throw new HttpError(
+          409,
+          `The updated pass costs ₹${delta.toLocaleString('en-IN')} more. Collect the difference and enter its payment reference.`,
+          { extraDue: delta, newAmount },
+        );
+      }
+
+      const scheduleDays = Math.max(1, Number(schedule.schedule_days) || 1);
+      const passDays = Math.max(1, Math.min(Number(ticket.valid_days) || 1, scheduleDays));
+      const qrToken = makeQrToken();
+
+      await conn.execute(
+        `UPDATE event_bookings
+         SET schedule_id = ?, ticket_type_id = ?, qty = ?, pass_days = ?, unit_price = ?,
+             gross_amount = ?, discount_amount = ?, amount = ?, qr_token = ?, pass_sent_at = NULL
+         WHERE id = ?`,
+        [
+          schedule.id,
+          ticket.id,
+          input.qty,
+          passDays,
+          pricing.price,
+          newGross,
+          discount,
+          newAmount,
+          qrToken,
+          booking.id,
+        ],
+      );
+
+      await replaceAttendees(conn, booking.id, [
+        { name: booking.name, phone: booking.phone, email: booking.email },
+        ...input.attendees,
+      ]);
+
+      if (booking.coupon_code) {
+        await conn.execute(
+          'UPDATE event_coupon_uses SET amount_off = ? WHERE booking_id = ?',
+          [discount, booking.id],
+        );
+      }
+
+      if (delta > 0) {
+        await conn.execute(
+          `INSERT INTO event_payments (booking_id, provider, provider_ref, amount, status, raw)
+           VALUES (?, 'admin', ?, ?, 'captured', ?)`,
+          [
+            booking.id,
+            input.paymentReference || null,
+            delta,
+            JSON.stringify({
+              kind: 'amendment',
+              reason: input.reason,
+              by: req.admin.id,
+              fromScheduleId: Number(booking.schedule_id),
+              toScheduleId: Number(schedule.id),
+            }),
+          ],
+        );
+      }
+
+      return { pricing, newGross, discount, newAmount, delta, passDays, oldAmount };
+    });
+
+    const updated = await loadBookingById(booking.id);
+    const pass = publicPass(updated);
+    const passFields = {
+      reference: updated.reference,
+      eventName: updated.event_name_en,
+      ticketName: updated.ticket_name_en,
+      venue: updated.venue_name_en,
+      address: updated.address_en,
+      city: updated.city_name_en,
+      state: updated.state_name_en,
+      dateLabel: updated.date_label_en,
+      mapUrl: bookingMapUrl(updated),
+      qty: Number(updated.qty),
+      amount: Number(updated.amount),
+      qrToken: updated.qr_token,
+      passDays: pass.passDays,
+      attendees: pass.attendees,
+      bookingId: updated.id,
+      note: 'Your booking was changed by the Adhyatmik Bharat team. This new QR replaces every earlier pass for this booking — please discard the old one.',
+    };
+    try {
+      const delivery = await sendPassEmail({ to: updated.email, name: updated.name, ...passFields });
+      for (const attendee of attendeeEmails(pass.attendees, updated.email)) {
+        await sendPassEmail({ to: attendee.email, name: attendee.name, ...passFields });
+      }
+      if (delivery.delivered) {
+        await query('UPDATE event_bookings SET pass_sent_at = NOW() WHERE id = ?', [updated.id]);
+      }
+    } catch (err) {
+      console.error(`[amend-email] ${updated.reference}:`, err.message);
+    }
+
+    await audit({
+      actorType: 'admin',
+      actorId: req.admin.id,
+      action: 'event.booking.amended',
+      entity: 'event_booking',
+      entityId: String(updated.id),
+      meta: {
+        reference: updated.reference,
+        reason: input.reason,
+        from: { scheduleId: Number(booking.schedule_id), ticketTypeId: Number(booking.ticket_type_id), qty: Number(booking.qty) },
+        to: { scheduleId: Number(schedule.id), ticketTypeId: Number(ticket.id), qty: input.qty },
+        oldAmount: outcome.oldAmount,
+        newAmount: outcome.newAmount,
+        delta: outcome.delta,
+        paymentReference: input.paymentReference || null,
+      },
+      ip: clientIp(req),
+    });
+
+    res.json({
+      pass,
+      amount: outcome.newAmount,
+      difference: outcome.delta,
+      extraPaid: Math.max(0, outcome.delta),
+      refundDue: Math.max(0, -outcome.delta),
+    });
+  }),
+);
+
+/* --------------------------- Cancellation & refunds --------------------------- */
+
+const BOOKING_NOTICE_SELECT = `
+  SELECT b.id, b.reference, b.name, b.email, b.status, b.amount, b.qty, b.pass_days, b.source,
+         b.cancel_reason, b.refund_amount, b.refund_reference,
+         e.name_en AS event_name, e.date_label_en,
+         tt.name_en AS ticket_name, v.name_en AS venue_name, c.name_en AS city_name,
+         (SELECT COUNT(*) FROM event_booking_checkins ci WHERE ci.booking_id = b.id) AS check_in_count
+  FROM event_bookings b
+  JOIN events e ON e.id = b.event_id
+  JOIN event_ticket_types tt ON tt.id = b.ticket_type_id
+  JOIN event_schedules s ON s.id = b.schedule_id
+  JOIN event_venues v ON v.id = s.venue_id
+  JOIN event_cities c ON c.id = s.city_id
+`;
+
+async function loadBookingNotice(id) {
+  const [row] = await query(`${BOOKING_NOTICE_SELECT} WHERE b.id = ? LIMIT 1`, [id]);
+  return row ?? null;
+}
+
+async function sendCancellationNotice(row, { reason, refundAmount, refundReference, status }) {
+  try {
+    await sendBookingNoticeEmail({
+      to: row.email,
+      name: row.name,
+      reference: row.reference,
+      eventName: row.event_name,
+      ticketName: row.ticket_name,
+      venue: row.venue_name,
+      city: row.city_name,
+      dateLabel: row.date_label_en || '',
+      qty: Number(row.qty),
+      amount: Number(row.amount),
+      status,
+      reason,
+      refundAmount: Number(refundAmount) || 0,
+      refundReference: refundReference || null,
+      bookingId: row.id,
+    });
+  } catch (err) {
+    console.error(`[booking-notice] ${row.reference}:`, err.message);
+  }
+}
+
+/** Allocates a refund across captured payments (newest first) and keeps the trail in each payment's raw JSON. */
+async function recordRefundOnPayment(conn, bookingId, { refundAmount, refundReference, adminId }) {
+  const [payRows] = await conn.execute(
+    `SELECT id, amount, raw FROM event_payments
+     WHERE booking_id = ? AND status = 'captured' ORDER BY id DESC FOR UPDATE`,
+    [bookingId],
+  );
+  let remaining = Number(refundAmount);
+  for (const payment of payRows) {
+    if (remaining <= 0) break;
+    let raw = payment.raw;
+    if (typeof raw === 'string') {
+      try {
+        raw = JSON.parse(raw);
+      } catch {
+        raw = {};
+      }
+    }
+    raw = raw && typeof raw === 'object' ? raw : {};
+    const allocated = Math.min(remaining, Number(payment.amount));
+    raw.refund = {
+      ...(raw.refund || {}),
+      amount: Number(raw.refund?.amount || 0) + allocated,
+      reference: refundReference || null,
+      at: new Date().toISOString(),
+      by: adminId,
+    };
+    const fullyRefunded = Number(raw.refund.amount) >= Number(payment.amount);
+    await conn.execute(
+      'UPDATE event_payments SET status = ?, raw = ? WHERE id = ?',
+      [fullyRefunded ? 'refunded' : 'captured', JSON.stringify(raw), payment.id],
+    );
+    remaining -= allocated;
+  }
+}
+
+const cancelBookingSchema = z.object({
+  reason: z.string().trim().min(3).max(255),
+  refundAmount: z.coerce.number().int().min(0).max(10000000).default(0),
+  refundReference: z.string().trim().max(120).optional(),
+});
+
+adminRouter.post(
+  '/bookings/:id/cancel',
+  asyncHandler(async (req, res) => {
+    const parsed = cancelBookingSchema.safeParse(req.body);
+    if (!parsed.success) {
+      throw new HttpError(400, 'Add a cancellation reason and a valid refund amount.', parsed.error.flatten().fieldErrors);
+    }
+    const { reason, refundAmount, refundReference } = parsed.data;
+
+    const row = await loadBookingNotice(req.params.id);
+    if (!row) throw new HttpError(404, 'Booking not found.');
+    if (!['pending', 'paid'].includes(row.status)) {
+      throw new HttpError(409, 'This booking is already cancelled or refunded.');
+    }
+    if (Number(row.check_in_count) > 0) {
+      throw new HttpError(
+        409,
+        'This pass has already been scanned at the gate, so it cannot be cancelled. Block the pass instead if entry must stop.',
+      );
+    }
+    if (row.status !== 'paid' && refundAmount > 0) {
+      throw new HttpError(400, 'This booking has no captured payment, so there is nothing to refund.');
+    }
+    if (refundAmount > Number(row.amount)) {
+      throw new HttpError(400, `The refund cannot exceed the paid amount of ₹${Number(row.amount).toLocaleString('en-IN')}.`);
+    }
+
+    const finalStatus = refundAmount > 0 ? 'refunded' : 'cancelled';
+    const refundReferenceValue = refundReference ? refundReference : null;
+
+    await withTransaction(async (conn) => {
+      const [lockedRows] = await conn.execute('SELECT status FROM event_bookings WHERE id = ? FOR UPDATE', [row.id]);
+      const locked = lockedRows[0];
+      if (!locked || !['pending', 'paid'].includes(locked.status)) {
+        throw new HttpError(409, 'This booking was closed by another admin. Refresh the list and try again.');
+      }
+      const [usedRows] = await conn.execute(
+        'SELECT COUNT(*) AS n FROM event_booking_checkins WHERE booking_id = ?',
+        [row.id],
+      );
+      if (Number(usedRows[0].n) > 0) {
+        throw new HttpError(409, 'This pass has already been used at the gate, so it cannot be cancelled.');
+      }
+
+      await conn.execute(
+        `UPDATE event_bookings
+         SET status = ?, cancelled_at = NOW(), cancelled_by = ?, cancel_reason = ?,
+             refund_amount = ?, refund_reference = ?,
+             refunded_at = ${refundAmount > 0 ? 'NOW()' : 'NULL'}, refunded_by = ?
+         WHERE id = ?`,
+        [
+          finalStatus,
+          req.admin.id,
+          reason,
+          refundAmount > 0 ? refundAmount : null,
+          refundReferenceValue,
+          refundAmount > 0 ? req.admin.id : null,
+          row.id,
+        ],
+      );
+
+      if (refundAmount > 0) {
+        await recordRefundOnPayment(conn, row.id, {
+          refundAmount,
+          refundReference: refundReferenceValue,
+          adminId: req.admin.id,
+        });
+      }
+    });
+
+    await audit({
+      actorType: 'admin',
+      actorId: req.admin.id,
+      action: 'event.booking.cancelled',
+      entity: 'event_booking',
+      entityId: String(row.id),
+      meta: {
+        reference: row.reference,
+        reason,
+        previousStatus: row.status,
+        refundAmount,
+        refundReference: refundReferenceValue,
+        refunded: refundAmount > 0,
+      },
+      ip: clientIp(req),
+    });
+    if (refundAmount > 0) {
+      await audit({
+        actorType: 'admin',
+        actorId: req.admin.id,
+        action: 'event.booking.refunded',
+        entity: 'event_booking',
+        entityId: String(row.id),
+        meta: { reference: row.reference, refundAmount, refundReference: refundReferenceValue },
+        ip: clientIp(req),
+      });
+    }
+
+    await sendCancellationNotice(row, {
+      reason,
+      refundAmount,
+      refundReference: refundReferenceValue,
+      status: finalStatus,
+    });
+
+    const updated = await loadBookingById(row.id);
+    res.json({ pass: publicPass(updated), cancelled: true, refunded: refundAmount > 0 });
+  }),
+);
+
+const refundBookingSchema = z.object({
+  refundAmount: z.coerce.number().int().positive().max(10000000),
+  refundReference: z.string().trim().max(120).optional(),
+});
+
+/** Records the money refund for a booking that was cancelled earlier without one. */
+adminRouter.post(
+  '/bookings/:id/refund',
+  asyncHandler(async (req, res) => {
+    const parsed = refundBookingSchema.safeParse(req.body);
+    if (!parsed.success) {
+      throw new HttpError(400, 'Enter the refund amount being returned.', parsed.error.flatten().fieldErrors);
+    }
+    const { refundAmount } = parsed.data;
+    const refundReferenceValue = parsed.data.refundReference ? parsed.data.refundReference : null;
+
+    const row = await loadBookingNotice(req.params.id);
+    if (!row) throw new HttpError(404, 'Booking not found.');
+    if (row.status === 'refunded') throw new HttpError(409, 'This booking already has a refund recorded.');
+    if (row.status !== 'cancelled') {
+      throw new HttpError(409, 'Cancel the booking first, then record the refund against it.');
+    }
+    if (Number(row.check_in_count) > 0) {
+      throw new HttpError(409, 'This pass has already been used at the gate, so no refund can be recorded.');
+    }
+    if (Number(row.amount) <= 0) {
+      throw new HttpError(400, 'This was a free pass — there is no payment to refund.');
+    }
+    if (refundAmount > Number(row.amount)) {
+      throw new HttpError(400, `The refund cannot exceed the paid amount of ₹${Number(row.amount).toLocaleString('en-IN')}.`);
+    }
+
+    await withTransaction(async (conn) => {
+      const [lockedRows] = await conn.execute('SELECT status FROM event_bookings WHERE id = ? FOR UPDATE', [row.id]);
+      if (!lockedRows[0] || lockedRows[0].status !== 'cancelled') {
+        throw new HttpError(409, 'This booking changed status. Refresh the list and try again.');
+      }
+      await conn.execute(
+        `UPDATE event_bookings
+         SET status = 'refunded', refund_amount = ?, refund_reference = ?, refunded_at = NOW(), refunded_by = ?
+         WHERE id = ?`,
+        [refundAmount, refundReferenceValue, req.admin.id, row.id],
+      );
+      await recordRefundOnPayment(conn, row.id, {
+        refundAmount,
+        refundReference: refundReferenceValue,
+        adminId: req.admin.id,
+      });
+    });
+
+    await audit({
+      actorType: 'admin',
+      actorId: req.admin.id,
+      action: 'event.booking.refunded',
+      entity: 'event_booking',
+      entityId: String(row.id),
+      meta: { reference: row.reference, refundAmount, refundReference: refundReferenceValue },
+      ip: clientIp(req),
+    });
+
+    await sendCancellationNotice(row, {
+      reason: row.cancel_reason,
+      refundAmount,
+      refundReference: refundReferenceValue,
+      status: 'refunded',
+    });
+
+    const updated = await loadBookingById(row.id);
+    res.json({ pass: publicPass(updated), refunded: true });
   }),
 );
 

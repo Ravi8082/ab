@@ -15,6 +15,7 @@ import {
   Search,
   ShieldAlert,
   Ticket,
+  UserPlus,
   Users,
   X,
   XCircle,
@@ -28,6 +29,7 @@ type BlockedInfo = {
   reference: string;
   name: string;
   guestCategory: string;
+  ticketName?: string;
   reason: string;
   blockedBy: string | null;
 };
@@ -42,6 +44,7 @@ type DenialCode =
   | 'live_code_used'
   | 'live_code_expired'
   | 'static_disabled'
+  | 'unknown_attendee'
   | 'unknown';
 
 type DenialInfo = {
@@ -51,6 +54,8 @@ type DenialInfo = {
   code: DenialCode;
   status?: string;
   source?: string;
+  qty?: number;
+  amount?: number;
   passDays?: number;
   validFrom?: string;
   validTo?: string;
@@ -58,6 +63,11 @@ type DenialInfo = {
   entriesAllowed?: number;
   entriesUsed?: number;
   entriesLeft?: number;
+  entriesToday?: number;
+  entriesTodayAllowed?: number;
+  entriesTodayLeft?: number;
+  daysUsed?: number;
+  daysAllowed?: number;
   lastEntryDate?: string;
   lastEntryAt?: string;
   lastGate?: string | null;
@@ -78,14 +88,14 @@ const DEDUPE_MS = 4000;
 
 const DENIED_COPY: Record<DenialCode, { en: string; hi: string; note: string }> = {
   already_scanned: {
-    en: 'Already scanned today',
-    hi: 'आज यह पास पहले स्कैन हो चुका है',
-    note: 'One pass gives one entry per day. This devotee is already inside — do not let them in again on the same pass.',
+    en: 'All seats used today',
+    hi: 'आज की सभी सीटें उपयोग हो चुकी हैं',
+    note: 'Every attendee on this booking has already entered today. Do not let anyone else in on this QR today.',
   },
   entries_exhausted: {
-    en: 'All entries used',
-    hi: 'सभी प्रवेश खत्म',
-    note: 'Every entry day on this pass is finished. Send the devotee to the help desk if they need another pass.',
+    en: 'All event days used',
+    hi: 'सभी आयोजन दिन उपयोग हो चुके हैं',
+    note: 'Every event day covered by this pass is finished. Send the devotee to the help desk if they need another pass.',
   },
   expired: {
     en: 'Pass expired',
@@ -121,6 +131,11 @@ const DENIED_COPY: Record<DenialCode, { en: string; hi: string; note: string }> 
     en: 'Use the live QR',
     hi: 'लाइव QR दिखाएँ',
     note: 'Printed and static QR passes are switched off. Ask the devotee to open the pass and show the rotating QR.',
+  },
+  unknown_attendee: {
+    en: 'Name not on this pass',
+    hi: 'यह नाम इस पास पर नहीं है',
+    note: 'This booking does not carry that attendee number. Tick only the names listed on the pass.',
   },
   unknown: {
     en: 'Not allowed',
@@ -175,13 +190,16 @@ function LightChip({ children }: { children: ReactNode }) {
   );
 }
 
-function GuestChip({ category }: { category?: string }) {
+function GuestChip({ category, passName }: { category?: string; passName?: string }) {
   const badge = guestBadge(category);
+  // Every online booking carries guest_category 'visitor', so the identity word only means
+  // something when admin marked it VIP/press/staff — otherwise name the ticket actually bought.
+  const named = !passName || (category && category !== 'visitor');
   return (
     <span
       className={`rounded-full border px-2 py-0.5 font-ui text-[0.6rem] font-semibold uppercase tracking-[0.14em] ${badge.tone}`}
     >
-      {badge.en} · {badge.hi}
+      {named ? `${badge.en} · ${badge.hi}` : passName}
     </span>
   );
 }
@@ -211,11 +229,32 @@ function Fact({
   );
 }
 
-function SuccessBody({ result }: { result: CheckInResult }) {
+function SuccessBody({
+  result,
+  picked,
+  canAdmit,
+  busy,
+  error,
+  onToggle,
+  onPickAll,
+  onAdmit,
+}: {
+  result: CheckInResult;
+  picked: number[];
+  canAdmit: boolean;
+  busy: boolean;
+  error: string;
+  onToggle: (position: number) => void;
+  onPickAll: () => void;
+  onAdmit: () => void;
+}) {
   const entries = result.checkIn;
   const length = passLength(result.passDays ?? entries.entriesAllowed);
   const validTo = result.validTo ?? result.schedule.end_date ?? result.schedule.event_date;
   const close = timeOnly(result.schedule.end_time);
+  const roster = result.attendees ?? [];
+  const openNames = roster.filter((att) => !att.enteredToday);
+  const seatsLeft = Math.max(0, entries.entriesTodayLeft ?? 0);
 
   return (
     <div>
@@ -234,10 +273,16 @@ function SuccessBody({ result }: { result: CheckInResult }) {
           </p>
           <p className="truncate font-display text-xl leading-tight">{result.name}</p>
           <p className="mt-1.5 flex flex-wrap items-center gap-1.5">
-            <GuestChip category={result.guestCategory} />
+            <GuestChip category={result.guestCategory} passName={result.ticket?.name_en} />
             {length && <LightChip>{length}</LightChip>}
+            {result.qty > 1 && (
+              <LightChip>
+                {result.qty} seats · {result.qty} सीटें
+              </LightChip>
+            )}
             {result.gate && <LightChip>{result.gate}</LightChip>}
             {result.source === 'admin_free' && <LightChip>Free issue · निःशुल्क</LightChip>}
+            {result.offline && <LightChip>Offline · syncs later</LightChip>}
           </p>
         </div>
         <span className="shrink-0 rounded-lg bg-white/15 px-2.5 py-1 font-mono text-xs tracking-[0.08em]">
@@ -251,6 +296,32 @@ function SuccessBody({ result }: { result: CheckInResult }) {
           Valid till {formatDay(validTo)}
           {close ? ` · gate closes ${close}` : ''}
         </p>
+
+        {entries.seats > 1 && (
+          <p
+            className={`flex items-start gap-1.5 rounded-lg px-3 py-2 text-[0.72rem] font-semibold leading-relaxed ${
+              entries.entriesTodayLeft > 0 ? 'bg-amber-50 text-amber-800' : 'bg-emerald-50 text-emerald-800'
+            }`}
+          >
+            {entries.entriesTodayLeft > 0 ? (
+              <>
+                <Users size={14} className="mt-0.5 shrink-0" />
+                <span>
+                  {entries.entriesTodayLeft} more {entries.entriesTodayLeft === 1 ? 'seat' : 'seats'} from this booking
+                  can still enter today · इस बुकिंग की {entries.entriesTodayLeft}{' '}
+                  {entries.entriesTodayLeft === 1 ? 'सीट आज और प्रवेश कर सकती है' : 'सीटें आज और प्रवेश कर सकती हैं'}।
+                </span>
+              </>
+            ) : (
+              <>
+                <CheckCircle2 size={14} className="mt-0.5 shrink-0" />
+                <span>
+                  All {entries.entriesTodayAllowed} seats have entered today · आज की सभी सीटों का प्रवेश हो गया।
+                </span>
+              </>
+            )}
+          </p>
+        )}
 
         <dl className="grid gap-3 sm:grid-cols-2">
           <Fact
@@ -269,24 +340,110 @@ function SuccessBody({ result }: { result: CheckInResult }) {
             sub={`${result.email} · ${result.phone}`}
           />
           <Fact
+            icon={<Users size={15} />}
+            label="Entry today"
+            value={
+              entries.seats > 1
+                ? `${entries.entriesToday} of ${entries.entriesTodayAllowed} seats entered`
+                : '1 seat entered'
+            }
+            sub={
+              entries.seats > 1
+                ? `${entries.entriesTodayLeft} ${
+                    entries.entriesTodayLeft === 1 ? 'seat' : 'seats'
+                  } still open today · ${formatDateTime(result.checkedInAt)}`
+                : formatDateTime(result.checkedInAt)
+            }
+          />
+          <Fact
             icon={<Clock3 size={15} />}
-            label="Entries"
-            value={`${entries.entriesUsed} of ${entries.entriesAllowed} used · ${entries.entriesLeft} left`}
-            sub={`Event day ${entries.dayNumber} of ${entries.calendarDays} · ${formatDateTime(result.checkedInAt)}`}
+            label="Pass usage"
+            value={`${entries.daysUsed} of ${entries.daysAllowed} event ${
+              entries.daysAllowed === 1 ? 'day' : 'days'
+            } used`}
+            sub={`${entries.entriesUsed} of ${entries.entriesAllowed} total entries · event day ${entries.dayNumber} of ${entries.calendarDays}`}
           />
         </dl>
 
-        {result.attendees && result.attendees.length > 1 && (
-          <div className="rounded-xl border border-emerald-200 bg-emerald-50/70 px-3 py-2">
-            <p className="font-ui text-[0.58rem] uppercase tracking-[0.14em] text-emerald-800">Names on this pass</p>
-            {result.attendees.map((att) => (
-              <p key={att.position} className="mt-0.5 truncate text-xs text-ink">
-                <span className="font-semibold">
-                  {att.position}. {att.name}
-                </span>{' '}
-                · {att.phone}
+        {roster.length > 1 && (
+          <div className="rounded-xl border border-emerald-200 bg-emerald-50/70 px-3 py-2.5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p className="font-ui text-[0.58rem] uppercase tracking-[0.14em] text-emerald-800">
+                Names on this pass · कौन अंदर जा रहा है
               </p>
-            ))}
+              {canAdmit && openNames.length > 0 && (
+                <button
+                  type="button"
+                  onClick={onPickAll}
+                  className="rounded-lg px-2 py-1 font-ui text-[0.66rem] font-semibold text-emerald-800 underline decoration-emerald-300 underline-offset-2 hover:bg-emerald-100"
+                >
+                  Tick all {openNames.length} still outside
+                </button>
+              )}
+            </div>
+
+            <ul className="mt-1.5 grid gap-1 sm:grid-cols-2">
+              {roster.map((att) => {
+                const entered = Boolean(att.enteredToday);
+                const checked = entered || picked.includes(att.position);
+                return (
+                  <li key={att.position}>
+                    <label
+                      className={`flex items-start gap-2 rounded-lg px-1.5 py-1 text-xs transition-colors ${
+                        entered ? 'cursor-default bg-emerald-100/80' : canAdmit ? 'cursor-pointer hover:bg-white' : ''
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        className="mt-0.5 h-4 w-4 shrink-0 accent-emerald-700"
+                        checked={checked}
+                        disabled={entered || !canAdmit}
+                        onChange={() => onToggle(att.position)}
+                        aria-label={`Let ${att.name} in now`}
+                      />
+                      <span className="min-w-0">
+                        <span className="block truncate font-semibold text-ink">
+                          {att.position}. {att.name}
+                        </span>
+                        <span className="block truncate text-[0.68rem] text-muted">
+                          {att.phone}
+                          {entered && ' · entered · अंदर'}
+                        </span>
+                      </span>
+                    </label>
+                  </li>
+                );
+              })}
+            </ul>
+
+            <div className="mt-2.5 flex flex-wrap items-center justify-between gap-2 border-t border-emerald-200/70 pt-2.5">
+              <p className="text-[0.72rem] font-semibold text-emerald-900">
+                {picked.length > 0
+                  ? `${picked.length} going in now · ${picked.length} लोग अभी अंदर`
+                  : `${openNames.length} still outside today · ${seatsLeft} ${
+                      seatsLeft === 1 ? 'seat' : 'seats'
+                    } open today`}
+              </p>
+              {canAdmit && (
+                <button
+                  type="button"
+                  onClick={onAdmit}
+                  disabled={busy || picked.length === 0 || picked.length > seatsLeft}
+                  className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-700 px-3.5 py-2 font-ui text-xs font-semibold text-white transition-colors hover:bg-emerald-800 disabled:opacity-50"
+                >
+                  {busy ? <Loader2 size={14} className="animate-spin" /> : <UserPlus size={14} />}
+                  {busy ? 'Admitting…' : `Let ${picked.length || 0} in · प्रवेश दें`}
+                </button>
+              )}
+            </div>
+
+            {!canAdmit && (
+              <p className="mt-1.5 text-[0.68rem] text-emerald-900/80">
+                Ticks show who has already entered. Group entry by name needs a live connection · नाम से प्रवेश के लिए
+                इंटरनेट चाहिए.
+              </p>
+            )}
+            {error && <p className="mt-1.5 text-[0.7rem] font-semibold text-red-700">{error}</p>}
           </div>
         )}
 
@@ -305,6 +462,7 @@ function AlertHeader({
   name,
   reference,
   guestCategory,
+  passName,
   chips,
   icon,
 }: {
@@ -312,6 +470,7 @@ function AlertHeader({
   name: string;
   reference: string;
   guestCategory: string;
+  passName?: string;
   chips: ReactNode[];
   icon: ReactNode;
 }) {
@@ -329,7 +488,7 @@ function AlertHeader({
         <p className="font-ui text-[0.62rem] uppercase tracking-[0.18em] text-red-100">{label}</p>
         <p className="truncate font-display text-xl leading-tight">{name}</p>
         <p className="mt-1.5 flex flex-wrap items-center gap-1.5">
-          <GuestChip category={guestCategory} />
+          <GuestChip category={guestCategory} passName={passName} />
           {chips}
         </p>
       </div>
@@ -354,6 +513,7 @@ function BlockedBody({ feedback }: { feedback: Extract<Feedback, { kind: 'blocke
         name={info.name}
         reference={info.reference}
         guestCategory={info.guestCategory}
+        passName={info.ticketName}
         chips={[<LightChip key="chip">{copy.en}</LightChip>]}
         icon={<ShieldAlert size={30} />}
       />
@@ -394,6 +554,7 @@ function DeniedBody({ feedback }: { feedback: Extract<Feedback, { kind: 'denied'
         name={denied.name}
         reference={denied.reference}
         guestCategory={denied.guestCategory}
+        passName={denied.ticketName}
         chips={[
           <LightChip key="reason">{copy.en}</LightChip>,
           ...(length ? [<LightChip key="length">{length}</LightChip>] : []),
@@ -443,11 +604,15 @@ function DeniedBody({ feedback }: { feedback: Extract<Feedback, { kind: 'denied'
             value={lastScan}
             sub={
               [
-                denied.entriesAllowed
-                  ? `${denied.entriesUsed ?? 0} of ${denied.entriesAllowed} ${
-                      denied.entriesAllowed === 1 ? 'entry' : 'entries'
-                    } used · ${denied.entriesLeft ?? 0} open`
+                denied.code === 'already_scanned'
+                  ? `${denied.entriesToday ?? 0} of ${
+                      denied.entriesTodayAllowed ?? denied.entriesAllowed ?? 0
+                    } seats entered today`
                   : null,
+                denied.entriesAllowed
+                  ? `${denied.entriesUsed ?? 0} of ${denied.entriesAllowed} total entries used`
+                  : null,
+                denied.daysAllowed ? `${denied.daysUsed ?? 0} of ${denied.daysAllowed} event days used` : null,
                 denied.lastGate
                   ? `Gate ${denied.lastGate}${denied.lastStaff ? ` · ${denied.lastStaff}` : ''}`
                   : null,
@@ -463,11 +628,21 @@ function DeniedBody({ feedback }: { feedback: Extract<Feedback, { kind: 'denied'
             value={
               denied.code === 'not_paid'
                 ? `Status: ${denied.status ?? 'pending'}`
-                : guestBadge(denied.guestCategory).en === 'Visitor'
-                  ? 'Visitor pass'
-                  : `${guestBadge(denied.guestCategory).en} pass`
+                : `${denied.qty ?? 1} ${
+                    (denied.qty ?? 1) === 1 ? 'seat' : 'seats'
+                  } · ${denied.amount ? `${formatRupees(denied.amount)} paid` : 'Free pass'}`
             }
-            sub={denied.source === 'admin_free' ? 'Free issue by admin · निःशुल्क' : undefined}
+            sub={
+              [
+                denied.ticketName,
+                denied.source === 'admin_free' ? 'Free issue by admin · निःशुल्क' : null,
+                denied.guestCategory && denied.guestCategory !== 'visitor'
+                  ? `${guestBadge(denied.guestCategory).en} guest`
+                  : null,
+              ]
+                .filter(Boolean)
+                .join(' · ') || undefined
+            }
           />
         </dl>
       </div>
@@ -496,10 +671,12 @@ export default function ScanConsole({
   scan,
   onCheckedIn,
   title = 'Scan a pass',
+  offline = false,
 }: {
-  scan: (code: string, gate?: string) => Promise<CheckInResult>;
+  scan: (code: string, gate?: string, positions?: number[]) => Promise<CheckInResult>;
   onCheckedIn?: () => void;
   title?: string;
+  offline?: boolean;
 }) {
   const [manual, setManual] = useState('');
   const [gate, setGate] = useState(() => {
@@ -514,6 +691,10 @@ export default function ScanConsole({
   const [camera, setCamera] = useState<'idle' | 'starting' | 'running' | 'error'>('idle');
   const [cameraError, setCameraError] = useState('');
   const [stoppedAfterScan, setStoppedAfterScan] = useState(false);
+  const [picked, setPicked] = useState<number[]>([]);
+  const [admitBusy, setAdmitBusy] = useState(false);
+  const [admitError, setAdmitError] = useState('');
+  const lastCodeRef = useRef('');
 
   const scannerRef = useRef<Html5Qrcode | null>(null);
   const busyRef = useRef(false);
@@ -604,6 +785,9 @@ export default function ScanConsole({
     setStoppedAfterScan(Boolean(scannerRef.current));
     try {
       const result = await scanRef.current(code, gateRef.current.trim() || undefined);
+      lastCodeRef.current = code;
+      setPicked([]);
+      setAdmitError('');
       setFeedback({ kind: 'success', result });
       setManual('');
       onCheckedInRef.current?.();
@@ -630,6 +814,7 @@ export default function ScanConsole({
               reference: String(details.reference ?? code.toUpperCase()),
               name: String(details.name ?? 'This devotee'),
               guestCategory: String(details.guestCategory ?? 'visitor'),
+              ticketName: details.ticket?.name_en,
               reason: String(details.reason ?? 'Blocked by the admin.'),
               blockedBy: details.blockedBy ? String(details.blockedBy) : null,
             },
@@ -645,6 +830,7 @@ export default function ScanConsole({
             'live_code_used',
             'live_code_expired',
             'static_disabled',
+            'unknown_attendee',
           ];
           const rawCode = String(details.code ?? details.reason ?? '');
           setFeedback({
@@ -657,6 +843,8 @@ export default function ScanConsole({
               code: known.includes(rawCode as DenialCode) ? (rawCode as DenialCode) : 'unknown',
               status: details.status,
               source: details.source,
+              qty: details.qty,
+              amount: details.amount,
               passDays: details.passDays,
               validFrom: details.validFrom,
               validTo: details.validTo,
@@ -664,6 +852,11 @@ export default function ScanConsole({
               entriesAllowed: details.entriesAllowed,
               entriesUsed: details.entriesUsed,
               entriesLeft: details.entriesLeft,
+              entriesToday: details.entriesToday,
+              entriesTodayAllowed: details.entriesTodayAllowed,
+              entriesTodayLeft: details.entriesTodayLeft,
+              daysUsed: details.daysUsed,
+              daysAllowed: details.daysAllowed,
               lastEntryDate: details.lastEntryDate,
               lastEntryAt: details.lastEntryAt,
               lastGate: details.lastGate ?? null,
@@ -718,12 +911,43 @@ export default function ScanConsole({
 
   const closeResult = () => {
     setFeedback(null);
+    setPicked([]);
+    setAdmitError('');
     setStoppedAfterScan(false);
   };
 
   const scanNext = () => {
     setFeedback(null);
+    setPicked([]);
+    setAdmitError('');
     void startCameraRef.current();
+  };
+
+  const success = feedback?.kind === 'success' ? feedback.result : null;
+  const openPositions = (success?.attendees ?? []).filter((att) => !att.enteredToday).map((att) => att.position);
+  const seatsLeftToday = Math.max(0, success?.checkIn.entriesTodayLeft ?? 0);
+
+  const togglePick = (position: number) =>
+    setPicked((current) =>
+      current.includes(position) ? current.filter((item) => item !== position) : [...current, position].sort((a, b) => a - b),
+    );
+
+  const pickAllRemaining = () => setPicked(openPositions.slice(0, seatsLeftToday));
+
+  const admitPicked = async () => {
+    if (!lastCodeRef.current || picked.length === 0) return;
+    setAdmitBusy(true);
+    setAdmitError('');
+    try {
+      const result = await scanRef.current(lastCodeRef.current, gateRef.current.trim() || undefined, picked);
+      setPicked([]);
+      setFeedback({ kind: 'success', result });
+      onCheckedInRef.current?.();
+    } catch (error) {
+      setAdmitError(error instanceof Error ? error.message : 'Those names could not be admitted.');
+    } finally {
+      setAdmitBusy(false);
+    }
   };
 
   const edge =
@@ -742,7 +966,10 @@ export default function ScanConsole({
           </span>
           <div>
             <h2 className="font-display text-xl leading-tight text-ink">{title}</h2>
-            <p className="text-[0.7rem] text-muted">QR pass or reference number · checked against the live database</p>
+            <p className="text-[0.7rem] text-muted">
+              QR pass or reference number ·{' '}
+              {offline ? "checked against this device's saved gate list" : 'checked against the live database'}
+            </p>
           </div>
         </div>
         {camera === 'running' ? (
@@ -767,6 +994,12 @@ export default function ScanConsole({
       </div>
 
       <div className="space-y-4 p-4 sm:p-5">
+        {offline && (
+          <p className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-[0.72rem] font-semibold leading-relaxed text-amber-800">
+            Offline mode — printed QR and AB26 references are checked against the saved gate list. Rotating live QR
+            needs internet; ask for the reference number if the camera reads a live code.
+          </p>
+        )}
         <div className="flex flex-col gap-2 rounded-xl border border-line bg-line/10 px-3 py-2.5 sm:flex-row sm:items-center">
           <span className="flex items-center gap-1.5 font-ui text-[0.62rem] uppercase tracking-[0.14em] text-muted">
             <MapPin size={13} className="text-saffron" /> Your gate
@@ -901,7 +1134,16 @@ export default function ScanConsole({
                   <X size={16} />
                 </button>
                 {feedback.kind === 'success' ? (
-                  <SuccessBody result={feedback.result} />
+                  <SuccessBody
+                    result={feedback.result}
+                    picked={picked}
+                    canAdmit={!offline}
+                    busy={admitBusy}
+                    error={admitError}
+                    onToggle={togglePick}
+                    onPickAll={pickAllRemaining}
+                    onAdmit={() => void admitPicked()}
+                  />
                 ) : feedback.kind === 'error' ? (
                   <ErrorBody message={feedback.message} notFound={feedback.notFound} />
                 ) : feedback.kind === 'blocked' ? (
@@ -914,7 +1156,9 @@ export default function ScanConsole({
               <div className="flex flex-wrap items-center justify-between gap-2 border-t border-line bg-line/10 px-4 py-3">
                 <p className="text-[0.68rem] text-muted">
                   {feedback.kind === 'success'
-                    ? 'Devotee verified — let them through.'
+                    ? feedback.result.offline
+                      ? 'Entry recorded offline — it will sync when the connection returns.'
+                      : 'Devotee verified — let them through.'
                     : 'This pass cannot enter. Point the devotee to the help desk.'}
                 </p>
                 <div className="flex items-center gap-2">

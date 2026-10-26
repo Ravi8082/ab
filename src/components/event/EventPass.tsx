@@ -17,7 +17,7 @@ import {
 } from 'lucide-react';
 import type { Lang } from '@/types';
 import { fetchGateSettings, issueLivePassCode, type EventBookingPass } from '@/lib/eventApi';
-import { formatDateRange, formatTimeRange, bi } from '@/lib/eventFormat';
+import { formatDateRange, formatTimeRange, bi, kindName } from '@/lib/eventFormat';
 import { formatRupees } from '@/lib/pricing';
 
 const STATUS_LABEL: Record<string, [string, string]> = {
@@ -140,12 +140,17 @@ export default function EventPass({
     return () => window.clearInterval(id);
   }, [liveExpiresAt]);
 
-  const calendarDays = Math.max(1, pass.calendarDays ?? totalDays);
-  const multiDay = totalDays > 1;
-  const daysUsed = pass.checkInCount;
-  const daysLeft = Math.max(0, totalDays - daysUsed);
   const clockLabel = (value: string) =>
     new Date(value.replace(' ', 'T')).toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit' });
+  const qty = Math.max(1, pass.qty);
+  const calendarDays = Math.max(1, pass.calendarDays ?? totalDays);
+  const multiDay = totalDays > 1;
+  const todayEntries = Math.min(qty, pass.todayCheckInCount ?? (pass.todayCheckInAt ? 1 : 0));
+  const todayLeft = Math.max(0, qty - todayEntries);
+  const entriesUsed = Math.max(0, pass.checkInCount ?? 0);
+  const daysUsed = Math.min(totalDays, pass.checkInDays ?? (pass.checkInAt ? 1 : 0));
+  const daysLeft = Math.max(0, totalDays - daysUsed);
+  const todayTime = pass.todayCheckInAt ? clockLabel(pass.todayCheckInAt) : '';
   const L = (en: string, hi: string) => bi(en, hi, lang);
   const status = STATUS_LABEL[pass.status];
   const roster = pass.attendees ?? [];
@@ -161,8 +166,8 @@ export default function EventPass({
           <div>
             <p className="font-ui text-[0.62rem] uppercase tracking-[0.24em] text-sky">
               {L(
-                pass.event.kind === 'expo' ? 'Expo entry pass' : 'Yatra entry pass',
-                pass.event.kind === 'expo' ? 'एक्स्पो प्रवेश पास' : 'यात्रा प्रवेश पास',
+                `${kindName(pass.event.kind, 'en', pass.event)} entry pass`,
+                `${kindName(pass.event.kind, 'hi', pass.event)} प्रवेश पास`,
               )}{' '}
               · {bi(pass.ticket.name_en, pass.ticket.name_hi, lang)}
             </p>
@@ -272,10 +277,16 @@ export default function EventPass({
             </button>
           )}
           <p className="mt-3 text-center text-[0.66rem] leading-relaxed text-muted">
-            {L('One QR for', 'एक QR से')} {pass.qty} {pass.qty === 1 ? L('person', 'व्यक्ति') : L('people', 'लोग')} ·{' '}
+            {L('One QR for', 'एक QR से')} {qty} {qty === 1 ? L('person', 'व्यक्ति') : L('people', 'लोग')} ·{' '}
             {multiDay
-              ? L(`${totalDays}-day pass, one entry per event day`, `${totalDays} दिनों का पास, हर आयोजन दिन में एक प्रवेश`)
-              : L(`single-day pass, one entry${calendarDays > 1 ? ' on any event day' : ''}`, `एक दिन का पास, किसी एक आयोजन दिन में प्रवेश`)}
+              ? L(
+                  `${totalDays}-day pass · each attendee may enter once per event day`,
+                  `${totalDays} दिनों का पास · हर व्यक्ति हर आयोजन दिन में एक बार प्रवेश`,
+                )
+              : L(
+                  `single-day pass · each attendee may enter once${calendarDays > 1 ? ' on one event day' : ''}`,
+                  `एक दिन का पास · हर व्यक्ति ${calendarDays > 1 ? 'किसी एक आयोजन दिन में ' : ''}एक बार प्रवेश`,
+                )}
           </p>
         </div>
 
@@ -377,50 +388,70 @@ export default function EventPass({
           </dl>
 
           <div className="mt-4 rounded-xl border border-line bg-sandal-2 px-3.5 py-3 text-xs leading-relaxed text-muted">
-            {pass.todayCheckInAt ? (
+            {todayEntries > 0 ? (
               <span className="flex items-start gap-2 text-emerald-700">
                 <ShieldCheck size={15} className="mt-0.5 shrink-0" />
-                {L('Entered today at', 'आज प्रवेश हुआ, समय')} {clockLabel(pass.todayCheckInAt)}.{' '}
+                {L(
+                  `${todayEntries} of ${qty} ${qty === 1 ? 'person has' : 'people have'} entered today${
+                    todayTime ? ` (last at ${todayTime})` : ''
+                  }. ${
+                    todayLeft > 0
+                      ? `${todayLeft} ${todayLeft === 1 ? 'seat is' : 'seats are'} still open today — show this QR once for each remaining person.`
+                      : `All ${qty} seats have entered today.${
+                          daysLeft > 0
+                            ? ` ${daysLeft} of ${totalDays} event ${daysLeft === 1 ? 'day is' : 'days are'} still open — the same QR works on a later event day.`
+                            : ' No event days remain.'
+                        }`
+                  }`,
+                  `${qty} में से ${todayEntries} ${qty === 1 ? 'व्यक्ति' : 'लोग'} ने आज प्रवेश किया${
+                    todayTime ? ` (अंतिम प्रवेश ${todayTime})` : ''
+                  }। ${
+                    todayLeft > 0
+                      ? `${todayLeft} सीटें आज और खुली हैं — बाकी लोगों के लिए यही QR दोबारा दिखाएँ।`
+                      : `आज सभी ${qty} सीटों का प्रवेश हो गया।${
+                          daysLeft > 0
+                            ? ` ${totalDays} में से ${daysLeft} आयोजन दिन अभी बाकी हैं — बाद के दिन यही QR काम करेगा।`
+                            : ' कोई आयोजन दिन बाकी नहीं है।'
+                        }`
+                  }`,
+                )}
+              </span>
+            ) : entriesUsed > 0 ? (
+              <span className="flex items-start gap-2 text-emerald-700">
+                <ShieldCheck size={15} className="mt-0.5 shrink-0" />
                 {daysLeft > 0
                   ? L(
-                      `${daysLeft} of ${totalDays} ${daysLeft === 1 ? 'entry is' : 'entries are'} still open — show the same QR on a later event day.`,
-                      `${totalDays} में से ${daysLeft} प्रवेश बाकी हैं — बाद के आयोजन दिन में यही QR दिखाएँ।`,
+                      `${entriesUsed} ${entriesUsed === 1 ? 'entry has' : 'entries have'} been used across ${daysUsed} of ${totalDays} event ${
+                        totalDays === 1 ? 'day' : 'days'
+                      }. Today's ${qty === 1 ? 'entry is' : `${qty} entries are`} still open — show this QR at the gate.`,
+                      `इस पास पर ${entriesUsed} प्रवेश उपयोग हो चुके हैं (${totalDays} में से ${daysUsed} आयोजन दिन)। आज ${
+                        qty === 1 ? 'का प्रवेश' : `की ${qty} सीटें`
+                      } अभी खुली ${qty === 1 ? 'है' : 'हैं'} — गेट पर यही QR दिखाएँ।`,
                     )
-                  : L('All entries on this pass are now used.', 'इस पास के सभी प्रवेश उपयोग हो चुके हैं।')}
-              </span>
-            ) : pass.checkInAt ? (
-              <span className="flex items-start gap-2 text-emerald-700">
-                <ShieldCheck size={15} className="mt-0.5 shrink-0" />
-                {multiDay || daysUsed > 1
-                  ? daysLeft > 0
-                    ? L(
-                        `${daysUsed} of ${totalDays} ${totalDays === 1 ? 'day' : 'days'} entered. Show the same QR for today's entry — ${daysLeft} ${daysLeft === 1 ? 'entry' : 'entries'} left.`,
-                        `${totalDays} में से ${daysUsed} दिन का प्रवेश हो चुका है। आज यही QR दिखाएँ — ${daysLeft} प्रवेश बाकी।`,
-                      )
-                    : L(
-                        `All ${totalDays} entries on this pass are used. Entry is closed.`,
-                        `इस पास के सभी ${totalDays} प्रवेश उपयोग हो चुके हैं। प्रवेश बंद है।`,
-                      )
                   : L(
-                      `Checked in on ${formatDateRange(pass.checkInAt, pass.checkInAt, lang)} at ${clockLabel(pass.checkInAt)}. This pass cannot be used again.`,
-                      `प्रवेश ${formatDateRange(pass.checkInAt, pass.checkInAt, lang)} को ${clockLabel(pass.checkInAt)} बजे दर्ज हुआ। यह पास दोबारा उपयोग नहीं होगा।`,
+                      `All ${totalDays} event ${totalDays === 1 ? 'day' : 'days'} on this pass are used. Entry is closed.`,
+                      `इस पास के सभी ${totalDays} आयोजन दिन उपयोग हो चुके हैं। प्रवेश बंद है।`,
                     )}
               </span>
             ) : paid ? (
               <span className="flex items-start gap-2">
                 <CheckCircle2 size={15} className="mt-0.5 shrink-0 text-success" />
-                {L('Show this QR at the gate. Staff scan it and match your reference before entry', 'गेट पर यह QR दिखाएँ। स्टाफ़ इसे स्कैन कर आपका संदर्भ नंबर मिलाएगा')}
-                {multiDay
-                  ? L(
-                      ` — this pass allows one entry on each of ${totalDays} event days.`,
-                      ` — इस पास से ${totalDays} आयोजन दिनों में हर दिन एक प्रवेश मिलेगा।`,
-                    )
-                  : calendarDays > 1
-                    ? L(
-                        ` — this single-day pass allows one entry on any one of ${calendarDays} event days.`,
-                        ` — इस एक-दिन वाले पास से ${calendarDays} आयोजन दिनों में किसी एक दिन एक प्रवेश मिलेगा।`,
-                      )
-                    : '.'}
+                {L(
+                  `Show this QR at the gate. It admits up to ${qty} ${qty === 1 ? 'person' : 'people'}${
+                    multiDay
+                      ? `, once per event day on each of ${totalDays} days.`
+                      : calendarDays > 1
+                        ? ` on one of the ${calendarDays} event days.`
+                        : '.'
+                  }`,
+                  `गेट पर यह QR दिखाएँ। इससे ${qty === 1 ? 'एक व्यक्ति' : `अधिकतम ${qty} लोग`}${
+                    multiDay
+                      ? ` ${totalDays} आयोजन दिनों में हर दिन एक बार प्रवेश कर सकते हैं।`
+                      : calendarDays > 1
+                        ? ` ${calendarDays} आयोजन दिनों में से किसी एक दिन प्रवेश कर सकते हैं।`
+                        : ' एक बार प्रवेश कर सकते हैं।'
+                  }`,
+                )}
               </span>
             ) : (
               <span className="flex items-start gap-2">

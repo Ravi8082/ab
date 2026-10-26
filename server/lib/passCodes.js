@@ -28,8 +28,9 @@ export function liveCodeFor(reference, code) {
 }
 
 /**
- * Issues a 60-second single-use code for one booking. Only the newest code stays usable, so a
- * screenshot taken moments ago stops working as soon as the devotee's screen refreshes.
+ * Issues a 60-second code for one booking. A single-seat pass keeps only the newest code usable,
+ * so a screenshot stops working as soon as the devotee's screen refreshes. Group passes keep
+ * older codes alive for the 60 seconds so every attendee's screen can show a working code.
  */
 export async function issuePassCode({ reference, contact, ip }) {
   const ref = String(reference || '').trim().toUpperCase();
@@ -37,7 +38,7 @@ export async function issuePassCode({ reference, contact, ip }) {
   if (!ref || !who) throw new HttpError(400, 'Enter the booking reference and the email used for it.');
 
   const [booking] = await query(
-    `SELECT id, reference, email, phone, status FROM event_bookings WHERE reference = ? LIMIT 1`,
+    `SELECT id, reference, email, phone, status, qty FROM event_bookings WHERE reference = ? LIMIT 1`,
     [ref],
   );
   if (!booking) throw new HttpError(404, 'Booking not found.');
@@ -49,12 +50,15 @@ export async function issuePassCode({ reference, contact, ip }) {
     throw new HttpError(409, 'The live gate QR is issued only for paid passes.');
   }
 
-  // Only the code on screen right now should work.
-  await query(
-    `UPDATE event_pass_codes SET used_at = NOW(), used_gate = 'superseded'
-      WHERE booking_id = ? AND used_at IS NULL`,
-    [booking.id],
-  );
+  // One person's screen refresh must not kill the code another attendee is showing for a
+  // group booking, so only single-seat passes keep the strict screen-only rule.
+  if (Number(booking.qty) <= 1) {
+    await query(
+      `UPDATE event_pass_codes SET used_at = NOW(), used_gate = 'superseded'
+        WHERE booking_id = ? AND used_at IS NULL`,
+      [booking.id],
+    );
+  }
 
   let code = randomCode(10);
   for (let attempt = 0; attempt < 3; attempt += 1) {

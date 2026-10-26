@@ -3,6 +3,8 @@ import { useNavigate } from 'react-router-dom';
 import { AnimatePresence, motion } from 'framer-motion';
 import { Menu, Phone, Ticket, X } from 'lucide-react';
 import { useApp } from '@/context/AppContext';
+import { useBrand } from '@/context/BrandContext';
+import BrandMark from '@/components/BrandMark';
 
 const LINKS = [
   { id: 'yatra', en: 'Mahi Sundarkand', hi: 'माहि सुंदरकांड' },
@@ -10,19 +12,6 @@ const LINKS = [
   { id: 'my-booking', en: 'My booking', hi: 'मेरी बुकिंग' },
   { id: 'contact', en: 'Contact', hi: 'संपर्क' },
 ];
-
-function LotusMark() {
-  return (
-    <svg width="38" height="38" viewBox="0 0 40 40" fill="none" aria-hidden="true">
-      <circle cx="20" cy="20" r="19" stroke="#13BBE8" strokeOpacity=".45" />
-      <path d="M20 9c3.4 4.6 3.4 9.8 0 14.4-3.4-4.6-3.4-9.8 0-14.4Z" fill="#EE2C8F" />
-      <path d="M20 23.4c4-2.2 8.4-1.6 11.4 1.6-4 2.2-8.4 1.6-11.4-1.6Z" fill="#F39A1E" />
-      <path d="M20 23.4c-4-2.2-8.4-1.6-11.4 1.6 4 2.2 8.4 1.6 11.4-1.6Z" fill="#F39A1E" />
-      <path d="M20 23.4c5-2.6 10.4-2.4 14.4.8-5 2.6-10.4 2.4-14.4-.8Z" fill="#FFD21F" fillOpacity=".85" />
-      <path d="M20 23.4c-5-2.6-10.4-2.4-14.4.8 5 2.6 10.4 2.4 14.4-.8Z" fill="#FFD21F" fillOpacity=".85" />
-    </svg>
-  );
-}
 
 function LangToggle() {
   const { lang, setLang } = useApp();
@@ -46,6 +35,7 @@ function LangToggle() {
 
 export default function SiteHeader() {
   const { lang } = useApp();
+  const { brand } = useBrand();
   const navigate = useNavigate();
   const [scrolled, setScrolled] = useState(false);
   const [open, setOpen] = useState(false);
@@ -84,13 +74,13 @@ export default function SiteHeader() {
     >
       <div className="wrap flex items-center justify-between gap-3" style={{ height: 'var(--header-h)' }}>
         <button onClick={() => go('top')} className="flex shrink-0 items-center gap-2.5 text-left">
-          <LotusMark />
+          <BrandMark size={38} />
           <span className="leading-none">
             <span className="block font-display text-[1.05rem] font-semibold text-white sm:text-[1.15rem]">
-              Adhyatmik Bharat
+              {brand.name_en}
             </span>
             <span className="mt-1 hidden font-ui text-[0.56rem] uppercase tracking-[0.22em] text-sky sm:block">
-              {lang === 'en' ? 'Sundarkand Yatra · Expo 2027' : 'सुंदरकांड यात्रा · एक्स्पो 2027'}
+              {lang === 'en' ? brand.tagline_en : brand.tagline_hi}
             </span>
           </span>
         </button>

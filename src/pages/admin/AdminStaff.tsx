@@ -84,10 +84,26 @@ const KYC_STATUS_STYLES: Record<StaffKycStatus, string> = {
 
 const ALLOWED_MIME = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'];
 
+// Ambiguous characters (0/O/1/l/I) are excluded so a password survives being read aloud.
+const PASSWORD_SETS = {
+  upper: 'ABCDEFGHJKLMNPQRSTUVWXYZ',
+  lower: 'abcdefghijkmnopqrstuvwxyz',
+  digit: '23456789',
+};
+
+function randomChar(pool: string) {
+  return pool[crypto.getRandomValues(new Uint32Array(1))[0] % pool.length];
+}
+
 function suggestPassword() {
-  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
-  const values = crypto.getRandomValues(new Uint32Array(12));
-  return Array.from(values, (value) => alphabet[value % alphabet.length]).join('');
+  const all = Object.values(PASSWORD_SETS).join('');
+  const chars = [randomChar(PASSWORD_SETS.upper), randomChar(PASSWORD_SETS.lower), randomChar(PASSWORD_SETS.digit)];
+  while (chars.length < 14) chars.push(randomChar(all));
+  for (let i = chars.length - 1; i > 0; i -= 1) {
+    const j = crypto.getRandomValues(new Uint32Array(1))[0] % (i + 1);
+    [chars[i], chars[j]] = [chars[j], chars[i]];
+  }
+  return chars.join('');
 }
 
 function readFileBase64(file: File) {
@@ -674,7 +690,7 @@ export default function AdminStaff() {
           </Field>
           <Field
             label="Temporary password"
-            hint="At least 8 characters. Share it with the staff member securely — it is stored only as a bcrypt hash."
+            hint="At least 10 characters, with upper case, lower case and a number. Share it with the staff member securely — it is stored only as a bcrypt hash."
           >
             <div className="flex gap-2">
               <TextInput
@@ -682,7 +698,7 @@ export default function AdminStaff() {
                 onChange={(event) => setDraft({ ...draft, password: event.target.value })}
                 placeholder="Set a temporary password"
                 required
-                minLength={8}
+                minLength={10}
                 maxLength={200}
                 autoComplete="new-password"
                 className="font-mono"
@@ -985,7 +1001,7 @@ export default function AdminStaff() {
           {modalError && <Notice tone="error">{modalError}</Notice>}
           <Field
             label="New password"
-            hint="At least 8 characters. Any existing lockout is cleared when the password changes."
+            hint="At least 10 characters, with upper case, lower case and a number. Any existing lockout is cleared when the password changes."
           >
             <div className="flex gap-2">
               <TextInput
@@ -993,7 +1009,7 @@ export default function AdminStaff() {
                 onChange={(event) => setResetPassword(event.target.value)}
                 placeholder="New temporary password"
                 required
-                minLength={8}
+                minLength={10}
                 maxLength={200}
                 autoComplete="new-password"
                 className="font-mono"

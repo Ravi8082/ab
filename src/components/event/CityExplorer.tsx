@@ -1,50 +1,38 @@
-import { useMemo, useState } from 'react';
-import { AnimatePresence, motion } from 'framer-motion';
+import { useMemo } from 'react';
+import { motion } from 'framer-motion';
 import { ArrowRight, MapPin, ScrollText } from 'lucide-react';
 import type { Lang } from '@/types';
-import type { EventState } from '@/lib/eventApi';
 import type { ScheduleContext } from '@/lib/eventView';
 import { dayParts, formatDate, formatTimeRange, seatLabel, seatTone } from '@/lib/eventFormat';
 import PriceTag from '@/components/event/PriceTag';
-import StateWaitlist from '@/components/event/StateWaitlist';
 
 export default function CityExplorer({
   contexts,
-  states,
   lang,
   paused = false,
+  past = false,
   onBook,
 }: {
   contexts: ScheduleContext[];
-  states: EventState[];
   lang: Lang;
   paused?: boolean;
+  past?: boolean;
   onBook: (scheduleId: number, ticketId: number) => void;
 }) {
-  const [stateFilter, setStateFilter] = useState<'all' | number>('all');
-
   const cityGroups = useMemo(() => {
     const map = new Map<
-      number,
+      string,
       { city: ScheduleContext['city']; state: ScheduleContext['state']; venues: ScheduleContext[] }
     >();
     for (const context of contexts) {
-      if (stateFilter !== 'all' && context.state.id !== stateFilter) continue;
-      if (!map.has(context.city.id)) {
-        map.set(context.city.id, { city: context.city, state: context.state, venues: [] });
+      const key = `${context.city.id}:${context.schedule.event_date}:${context.schedule.start_time ?? ''}`;
+      if (!map.has(key)) {
+        map.set(key, { city: context.city, state: context.state, venues: [] });
       }
-      map.get(context.city.id)!.venues.push(context);
+      map.get(key)!.venues.push(context);
     }
     return Array.from(map.values());
-  }, [contexts, stateFilter]);
-
-  const stateOptions = useMemo(() => {
-    const scheduled = new Set(contexts.map((context) => context.state.id));
-    return states.map((state) => ({ state, scheduled: scheduled.has(state.id) }));
-  }, [contexts, states]);
-
-  const selectedState = stateFilter === 'all' ? null : (states.find((state) => state.id === stateFilter) ?? null);
-  const waitlisted = Boolean(selectedState) && cityGroups.length === 0;
+  }, [contexts]);
 
   const uniqueDates = useMemo(
     () => Array.from(new Set(contexts.map((context) => context.schedule.event_date))),
@@ -53,80 +41,44 @@ export default function CityExplorer({
 
   return (
     <div>
-      <div className="mb-6 flex flex-col gap-3">
-        <div className="flex flex-wrap gap-2">
-          <button
-            type="button"
-            onClick={() => setStateFilter('all')}
-            aria-pressed={stateFilter === 'all'}
-            className={`shrink-0 rounded-full border px-4 py-2 font-ui text-sm transition-all ${
-              stateFilter === 'all'
-                ? 'border-sindoor bg-sindoor text-white shadow-md'
-                : 'border-line bg-white text-text hover:border-saffron/50 hover:text-saffron-ink'
-            }`}
-          >
-            {lang === 'hi' ? 'सभी राज्य' : 'All states'}
-          </button>
-          {stateOptions.map((option) => {
-            const active = stateFilter === option.state.id;
-            return (
-              <button
-                key={option.state.id}
-                type="button"
-                onClick={() => setStateFilter(option.state.id)}
-                aria-pressed={active}
-                title={
-                  option.scheduled
-                    ? undefined
-                    : lang === 'hi'
-                      ? 'इस राज्य में सुंदरकांड यात्रा अभी घोषित नहीं'
-                      : 'No Sundarkand yatra city announced here yet'
-                }
-                className={`shrink-0 rounded-full border px-4 py-2 font-ui text-sm transition-all ${
-                  active
-                    ? 'border-sindoor bg-sindoor text-white shadow-md'
-                    : option.scheduled
-                      ? 'border-line bg-white text-text hover:border-saffron/50 hover:text-saffron-ink'
-                      : 'border-dashed border-line bg-sandal-2/40 text-muted hover:border-saffron/50 hover:text-saffron-ink'
-                }`}
-              >
-                {lang === 'hi' ? option.state.name_hi : option.state.name_en}
-              </button>
-            );
-          })}
-        </div>
-        {!waitlisted && (
-          <p className="text-xs text-muted">
-            {cityGroups.length} {lang === 'hi' ? 'शहर' : cityGroups.length === 1 ? 'city' : 'cities'} ·{' '}
-            {cityGroups.reduce((sum, group) => sum + group.venues.length, 0)} {lang === 'hi' ? 'स्थल' : 'venues'}
-            {uniqueDates.length === 1
-              ? ` · ${lang === 'hi' ? 'सभी' : 'all on'} ${formatDate(uniqueDates[0], lang, true)}`
-              : uniqueDates.length > 1
-                ? ` · ${uniqueDates.length} ${lang === 'hi' ? 'तिथियाँ' : 'event dates'}`
-                : ''}
-          </p>
-        )}
-      </div>
+      {cityGroups.length > 0 && (
+        <p className="mb-6 text-xs text-muted">
+          {past ? (
+            <>
+              {cityGroups.length} {lang === 'hi' ? 'बीते आयोजन' : cityGroups.length === 1 ? 'past event' : 'past events'}
+            </>
+          ) : (
+            <>
+              {cityGroups.length} {lang === 'hi' ? 'शहर' : cityGroups.length === 1 ? 'city' : 'cities'} ·{' '}
+              {cityGroups.reduce((sum, group) => sum + group.venues.length, 0)} {lang === 'hi' ? 'स्थल' : 'venues'}
+              {uniqueDates.length === 1
+                ? ` · ${lang === 'hi' ? 'सभी' : 'all on'} ${formatDate(uniqueDates[0], lang, true)}`
+                : uniqueDates.length > 1
+                  ? ` · ${uniqueDates.length} ${lang === 'hi' ? 'तिथियाँ' : 'event dates'}`
+                  : ''}
+            </>
+          )}
+        </p>
+      )}
 
-      {waitlisted && selectedState ? (
-        <StateWaitlist state={selectedState} lang={lang} />
+      {cityGroups.length === 0 ? (
+        <p className="rounded-2xl border border-dashed border-line bg-white/60 px-5 py-8 text-center text-sm text-muted">
+          {past
+            ? lang === 'hi'
+              ? 'अभी कोई बीता कार्यक्रम नहीं है।'
+              : 'No past events yet.'
+            : lang === 'hi'
+              ? 'नई तिथियाँ जल्द घोषित होंगी।'
+              : 'New dates will be announced soon.'}
+        </p>
       ) : (
-        <AnimatePresence mode="wait">
-
-        <motion.div
-          key={String(stateFilter)}
-          initial={{ opacity: 0, y: 12 }}
-          animate={{ opacity: 1, y: 0 }}
-          exit={{ opacity: 0, y: -8 }}
-          transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
-          className="grid items-start gap-5 lg:grid-cols-2"
-        >
+        <div className="grid items-start gap-5 lg:grid-cols-2">
           {cityGroups.map((group, index) => {
             const first = group.venues[0];
             const date = dayParts(first.schedule.event_date);
             return (
               <motion.article
-                key={group.city.id}
+                key={`${group.city.id}-${first.schedule.event_date}-${first.schedule.start_time ?? ''}`}
                 initial={{ opacity: 0, y: 18 }}
                 whileInView={{ opacity: 1, y: 0 }}
                 viewport={{ once: true, margin: '-40px' }}
@@ -165,7 +117,10 @@ export default function CityExplorer({
                   </div>
                   {group.venues.length > 1 && (
                     <p className="relative mt-3 inline-flex items-center gap-1.5 rounded-full bg-sky/10 px-2.5 py-1 text-[0.66rem] text-sky-ink">
-                      <MapPin size={11} /> {group.venues.length} venues in this city — pick your address
+                      <MapPin size={11} />{' '}
+                      {past
+                        ? `${group.venues.length} ${lang === 'hi' ? 'स्थल' : 'venues'}`
+                        : `${group.venues.length} venues in this city — pick your address`}
                     </p>
                   )}
                 </div>
@@ -173,7 +128,7 @@ export default function CityExplorer({
                 <div className="flex flex-1 flex-col divide-y divide-line">
                   {group.venues.map((context) => {
                     const salesClosed = context.schedule.sale_ended || context.schedule.date_passed;
-                    const closed = paused || salesClosed;
+                    const closed = past || paused || salesClosed;
                     return (
                       <div key={context.venue.id} className="p-5">
                         <div className="flex items-start gap-2.5">
@@ -231,7 +186,15 @@ export default function CityExplorer({
                                               : 'text-emerald-700'
                                     }`}
                                   >
-                                    {paused ? 'Bookings paused' : salesClosed ? 'Sales closed' : seatLabel(item.left)}
+                                    {past
+                                      ? lang === 'hi'
+                                        ? 'कार्यक्रम संपन्न'
+                                        : 'Event ended'
+                                      : paused
+                                        ? 'Bookings paused'
+                                        : salesClosed
+                                          ? 'Sales closed'
+                                          : seatLabel(item.left)}
                                   </span>
                                   <span className="grid h-7 w-7 place-items-center rounded-full bg-saffron/10 text-saffron-ink transition-colors group-hover:bg-saffron group-hover:text-white">
                                     <ArrowRight size={13} />
@@ -261,8 +224,7 @@ export default function CityExplorer({
               </motion.article>
             );
           })}
-        </motion.div>
-      </AnimatePresence>
+        </div>
       )}
     </div>
   );

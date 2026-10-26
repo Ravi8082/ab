@@ -36,10 +36,9 @@ const COPY = {
     verify: 'Verify and join the list',
     verifying: 'Verifying…',
     resend: 'Send the code again',
-    doneTitle: 'You are on the list',
+    doneTitle: 'Thank you',
     doneBody: (state: string) =>
-      `Radhe Radhe! We will contact you as soon as Mahi Sundarkand comes to ${state}. Your reference is`,
-    devNote: 'Development mode — the code is shown here because email is not configured yet.',
+      `Thank you! When Mahi Sundarkand is scheduled in ${state}, we will contact you. Your reference is`,
   },
   hi: {
     eyebrow: 'यात्रा के मार्ग पर अभी नहीं',
@@ -56,15 +55,56 @@ const COPY = {
     verify: 'सत्यापित करके सूची में जुड़ें',
     verifying: 'सत्यापन…',
     resend: 'कोड दोबारा भेजें',
-    doneTitle: 'आप सूची में हैं',
+    doneTitle: 'धन्यवाद',
     doneBody: (state: string) =>
-      `राधे राधे! महि सुंदरकांड ${state} आते ही हम आपसे संपर्क करेंगे। आपका संदर्भ है`,
-    devNote: 'डेवलपमेंट मोड — ईमेल कॉन्फ़िगर न होने के कारण कोड यहाँ दिखाया गया है।',
+      `धन्यवाद! जैसे ही ${state} में महि सुंदरकांड होगा, हम आपसे संपर्क करेंगे। आपका संदर्भ है`,
   },
 };
 
-export default function StateWaitlist({ state, lang }: { state: EventState; lang: Lang }) {
+const TONE = {
+  light: {
+    wrap: 'rounded-[24px] border border-line bg-white p-6 shadow-[0_20px_50px_-36px_rgba(15,35,66,.5)] sm:p-7',
+    chip: 'chip chip--lotus inline-flex items-center gap-1.5',
+    title: 'mt-3 font-display text-[1.7rem] leading-tight text-ink',
+    body: 'mt-2 text-sm leading-relaxed text-muted',
+    label: 'field-label',
+    input: 'field',
+    otp: 'field mt-4 text-center font-mono text-xl tracking-[0.5em]',
+    resend: 'btn btn-ghost btn-sm',
+    doneTitle: 'mt-2 font-ui text-sm font-semibold text-ink',
+    done: 'mt-2 flex items-start gap-2 text-sm leading-relaxed text-muted',
+    ref: 'font-mono text-ink',
+    privacy: 'mt-3 flex items-start gap-1.5 text-xs text-muted',
+    shield: 'mt-0.5 shrink-0 text-saffron',
+    email: 'mt-3 text-xs text-muted',
+    err: 'field-error',
+    note: 'field-error mt-2',
+  },
+  dark: {
+    wrap: 'rounded-2xl border border-white/12 bg-white/[0.045] p-4 sm:p-5',
+    chip: 'chip chip--on-dark inline-flex items-center gap-1.5',
+    title: 'mt-3 font-display text-[1.45rem] leading-tight text-white',
+    body: 'mt-2 text-sm leading-relaxed text-cream-on-dark/65',
+    label: 'mb-1.5 block font-ui text-[0.6rem] uppercase tracking-[0.18em] text-cream-on-dark/45',
+    input:
+      'w-full rounded-xl border border-sky/25 bg-white/[0.06] px-3.5 py-2.5 font-ui text-sm text-white outline-none transition-colors placeholder:text-cream-on-dark/30 focus:border-marigold/70',
+    otp: 'mt-4 w-full rounded-xl border border-sky/25 bg-white/[0.06] px-3.5 py-2.5 text-center font-mono text-xl tracking-[0.5em] text-white outline-none transition-colors placeholder:text-cream-on-dark/30 focus:border-marigold/70',
+    resend:
+      'inline-flex items-center justify-center rounded-full border border-white/15 px-4 py-2 text-sm text-cream-on-dark/75 transition-colors hover:border-marigold/50 hover:text-marigold disabled:opacity-50',
+    doneTitle: 'mt-2 font-ui text-sm font-semibold text-white',
+    done: 'mt-1.5 flex items-start gap-2 text-sm leading-relaxed text-cream-on-dark/70',
+    ref: 'font-mono text-white',
+    privacy: 'mt-3 flex items-start gap-1.5 text-xs text-cream-on-dark/45',
+    shield: 'mt-0.5 shrink-0 text-marigold/70',
+    email: 'mt-3 text-xs text-cream-on-dark/45',
+    err: 'mt-1 text-xs text-red-300',
+    note: 'mt-2 text-xs text-red-300',
+  },
+} as const;
+
+export default function StateWaitlist({ state, lang, dark = false }: { state: EventState; lang: Lang; dark?: boolean }) {
   const t = COPY[lang];
+  const tone = dark ? TONE.dark : TONE.light;
   const stateName = lang === 'hi' ? state.name_hi : state.name_en;
   const [step, setStep] = useState<Step>('form');
   const [name, setName] = useState('');
@@ -72,7 +112,6 @@ export default function StateWaitlist({ state, lang }: { state: EventState; lang
   const [phone, setPhone] = useState('');
   const [ref, setRef] = useState('');
   const [code, setCode] = useState('');
-  const [devCode, setDevCode] = useState('');
   const [errors, setErrors] = useState<FieldErrors>({});
   const [note, setNote] = useState('');
   const [busy, setBusy] = useState(false);
@@ -83,7 +122,6 @@ export default function StateWaitlist({ state, lang }: { state: EventState; lang
     try {
       const result = await eventApi.joinWaitlist({ stateId: state.id, name, email, phone });
       setRef(result.ref);
-      setDevCode(result.devCode ?? '');
       if (result.verified) {
         setStep('done');
       } else {
@@ -104,7 +142,6 @@ export default function StateWaitlist({ state, lang }: { state: EventState; lang
     setNote('');
     try {
       const result = await eventApi.resendWaitlistCode(ref);
-      setDevCode(result.devCode ?? '');
       if (result.verified) setStep('done');
     } catch (err) {
       setNote(err instanceof Error ? err.message : 'Could not send the code.');
@@ -136,40 +173,40 @@ export default function StateWaitlist({ state, lang }: { state: EventState; lang
       initial={{ opacity: 0, y: 14 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.4, ease: [0.22, 1, 0.36, 1] }}
-      className="rounded-[24px] border border-line bg-white p-6 shadow-[0_20px_50px_-36px_rgba(15,35,66,.5)] sm:p-7"
+      className={tone.wrap}
     >
-      <span className="chip chip--lotus inline-flex items-center gap-1.5">
+      <span className={tone.chip}>
         <BellRing size={12} />
         {t.eyebrow}
       </span>
-      <h3 className="mt-3 font-display text-[1.7rem] leading-tight text-ink">{t.title(stateName)}</h3>
+      <h3 className={tone.title}>{t.title(stateName)}</h3>
 
       {step === 'form' && (
         <>
-          <p className="mt-2 text-sm leading-relaxed text-muted">{t.body}</p>
+          <p className={tone.body}>{t.body}</p>
           <div className="mt-5 grid gap-3 sm:grid-cols-2">
             <div>
-              <label className="field-label" htmlFor={`wl-name-${state.id}`}>
+              <label className={tone.label} htmlFor={`wl-name-${state.id}`}>
                 {t.name}
               </label>
               <input
                 id={`wl-name-${state.id}`}
-                className="field"
+                className={tone.input}
                 value={name}
                 onChange={(e) => {
                   setName(e.target.value);
                   setErrors((c) => ({ ...c, name: undefined }));
                 }}
               />
-              {errors.name && <p className="field-error">{errors.name}</p>}
+              {errors.name && <p className={tone.err}>{errors.name}</p>}
             </div>
             <div>
-              <label className="field-label" htmlFor={`wl-email-${state.id}`}>
+              <label className={tone.label} htmlFor={`wl-email-${state.id}`}>
                 {t.email}
               </label>
               <input
                 id={`wl-email-${state.id}`}
-                className="field"
+                className={tone.input}
                 type="email"
                 value={email}
                 onChange={(e) => {
@@ -177,15 +214,15 @@ export default function StateWaitlist({ state, lang }: { state: EventState; lang
                   setErrors((c) => ({ ...c, email: undefined }));
                 }}
               />
-              {errors.email && <p className="field-error">{errors.email}</p>}
+              {errors.email && <p className={tone.err}>{errors.email}</p>}
             </div>
             <div className="sm:col-span-2">
-              <label className="field-label" htmlFor={`wl-phone-${state.id}`}>
+              <label className={tone.label} htmlFor={`wl-phone-${state.id}`}>
                 {t.phone}
               </label>
               <input
                 id={`wl-phone-${state.id}`}
-                className="field"
+                className={tone.input}
                 inputMode="numeric"
                 value={phone}
                 onChange={(e) => {
@@ -193,7 +230,7 @@ export default function StateWaitlist({ state, lang }: { state: EventState; lang
                   setErrors((c) => ({ ...c, phone: undefined }));
                 }}
               />
-              {errors.phone && <p className="field-error">{errors.phone}</p>}
+              {errors.phone && <p className={tone.err}>{errors.phone}</p>}
             </div>
           </div>
 
@@ -201,9 +238,9 @@ export default function StateWaitlist({ state, lang }: { state: EventState; lang
             {busy ? <Loader2 size={16} className="animate-spin" /> : <BellRing size={16} />}
             {busy ? t.sending : t.submit}
           </button>
-          {note && <p className="field-error mt-2">{note}</p>}
-          <p className="mt-3 flex items-start gap-1.5 text-xs text-muted">
-            <ShieldCheck size={13} className="mt-0.5 shrink-0 text-saffron" />
+          {note && <p className={tone.note}>{note}</p>}
+          <p className={tone.privacy}>
+            <ShieldCheck size={13} className={tone.shield} />
             {t.privacy}
           </p>
         </>
@@ -211,9 +248,9 @@ export default function StateWaitlist({ state, lang }: { state: EventState; lang
 
       {step === 'otp' && (
         <>
-          <p className="mt-2 text-sm leading-relaxed text-muted">{t.otpBody(email)}</p>
+          <p className={tone.body}>{t.otpBody(email)}</p>
           <input
-            className="field mt-4 text-center font-mono text-xl tracking-[0.5em]"
+            className={tone.otp}
             inputMode="numeric"
             maxLength={6}
             placeholder="••••••"
@@ -223,34 +260,30 @@ export default function StateWaitlist({ state, lang }: { state: EventState; lang
               setErrors({});
             }}
           />
-          {errors.code && <p className="field-error mt-2">{errors.code}</p>}
-          {devCode && (
-            <p className="mt-3 rounded-xl bg-sandal-2 px-3 py-2 text-xs text-muted">
-              {t.devNote} <strong className="font-mono tracking-[0.16em]">{devCode}</strong>
-            </p>
-          )}
+          {errors.code && <p className={tone.note}>{errors.code}</p>}
           <div className="mt-4 flex flex-wrap items-center gap-2">
             <button type="button" className="btn btn-primary btn-sm" onClick={() => void verify()} disabled={busy || code.length !== 6}>
               {busy ? <Loader2 size={15} className="animate-spin" /> : <CheckCircle2 size={15} />}
               {busy ? t.verifying : t.verify}
             </button>
-            <button type="button" className="btn btn-ghost btn-sm" onClick={() => void resend()} disabled={busy}>
+            <button type="button" className={tone.resend} onClick={() => void resend()} disabled={busy}>
               {t.resend}
             </button>
           </div>
-          {note && <p className="field-error mt-2">{note}</p>}
+          {note && <p className={tone.note}>{note}</p>}
         </>
       )}
 
       {step === 'done' && (
         <>
-          <p className="mt-2 flex items-start gap-2 text-sm leading-relaxed text-muted">
-            <CheckCircle2 size={16} className="mt-0.5 shrink-0 text-emerald-600" />
+          <h4 className={tone.doneTitle}>{t.doneTitle}</h4>
+          <p className={tone.done}>
+            <CheckCircle2 size={16} className="mt-0.5 shrink-0 text-emerald-400" />
             <span>
-              {t.doneBody(stateName)} <strong className="font-mono text-ink">{ref}</strong>
+              {t.doneBody(stateName)} <strong className={tone.ref}>{ref}</strong>
             </span>
           </p>
-          <p className="mt-3 text-xs text-muted">{email}</p>
+          <p className={tone.email}>{email}</p>
         </>
       )}
     </motion.div>

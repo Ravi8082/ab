@@ -1,14 +1,17 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   BellRing,
   Building2,
   ChevronDown,
   ChevronRight,
+  Download,
   ExternalLink,
+  Mail,
   MapPin,
   Pencil,
   Plus,
   RefreshCw,
+  Send,
   Trash2,
 } from 'lucide-react';
 import {
@@ -19,7 +22,9 @@ import {
   adminDeleteState,
   adminDeleteVenue,
   adminDeleteWaitlist,
+  adminDownloadWaitlist,
   adminLocations,
+  adminMessageWaitlist,
   adminUpdateCity,
   adminUpdateState,
   adminUpdateVenue,
@@ -37,17 +42,27 @@ import {
   Notice,
   PageHeader,
   Panel,
+  Select,
   Spinner,
   TextArea,
   TextInput,
   Toggle,
   formatDateTime,
 } from '@/components/admin/ui';
+import { CityPicker, StatePicker } from '@/components/admin/PlacePickers';
+import { mapsSearchUrl } from '@/lib/indiaPlaces';
 
 type Editor =
   | { type: 'state'; mode: 'new' | 'edit'; id?: number; draft: StateInput }
-  | { type: 'city'; mode: 'new' | 'edit'; id?: number; label: string; draft: CityInput }
-  | { type: 'venue'; mode: 'new' | 'edit'; id?: number; label: string; draft: VenueInput };
+  | { type: 'city'; mode: 'new' | 'edit'; id?: number; label: string; stateCode: string; draft: CityInput }
+  | {
+      type: 'venue';
+      mode: 'new' | 'edit';
+      id?: number;
+      label: string;
+      placeNames: string[];
+      draft: VenueInput;
+    };
 
 const emptyState = (): StateInput => ({ code: '', name_en: '', name_hi: '', sort_order: 1, active: 1 });
 const emptyCity = (stateId: number): CityInput => ({ state_id: stateId, name_en: '', name_hi: '', sort_order: 1, active: 1 });
@@ -71,6 +86,84 @@ export default function AdminLocations() {
   const [expanded, setExpanded] = useState<Record<number, boolean>>({});
   const [editor, setEditor] = useState<Editor | null>(null);
   const [waitlist, setWaitlist] = useState<WaitlistRow[]>([]);
+  const [exporting, setExporting] = useState(false);
+  const [messageOpen, setMessageOpen] = useState(false);
+  const [messageStateId, setMessageStateId] = useState<number | ''>('');
+  const [messageSubject, setMessageSubject] = useState('');
+  const [messageBody, setMessageBody] = useState('');
+  const [sendingMessage, setSendingMessage] = useState(false);
+
+  const waitlistStates = useMemo(() => {
+    const map = new Map<number, { name: string; verified: Set<string> }>();
+    for (const row of waitlist) {
+      const entry = map.get(row.state_id) ?? { name: row.state_en, verified: new Set<string>() };
+      if (row.status === 'verified') entry.verified.add(row.email.toLowerCase());
+      map.set(row.state_id, entry);
+    }
+    return Array.from(map, ([id, entry]) => ({ id, name: entry.name, verified: entry.verified.size }));
+  }, [waitlist]);
+
+  const verifiedRecipients = useMemo(() => {
+    const emails = new Set<string>();
+    for (const row of waitlist) {
+      if (row.status !== 'verified') continue;
+      if (messageStateId !== '' && row.state_id !== messageStateId) continue;
+      emails.add(row.email.toLowerCase());
+    }
+    return emails.size;
+  }, [waitlist, messageStateId]);
+
+  const exportWaitlist = async () => {
+    setExporting(true);
+    setError('');
+    setNotice('');
+    try {
+      await adminDownloadWaitlist();
+      setNotice('Waitlist CSV downloaded.');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not export the waitlist.');
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const openMessage = () => {
+    setMessageStateId('');
+    setMessageSubject('');
+    setMessageBody('');
+    setError('');
+    setNotice('');
+    setMessageOpen(true);
+  };
+
+  const sendMessage = async () => {
+    if (!messageSubject.trim() || messageBody.trim().length < 10) {
+      setError('Write a subject and a message of at least 10 characters.');
+      return;
+    }
+    setSendingMessage(true);
+    setError('');
+    setNotice('');
+    try {
+      const result = await adminMessageWaitlist({
+        stateId: messageStateId === '' ? null : messageStateId,
+        subject: messageSubject.trim(),
+        message: messageBody.trim(),
+      });
+      const parts = [
+        `Email sent to ${result.recipients} verified ${result.recipients === 1 ? 'devotee' : 'devotees'}`,
+      ];
+      if (result.sent) parts.push(`${result.sent} delivered`);
+      if (result.failed) parts.push(`${result.failed} failed`);
+      if (!result.emailConfigured) parts.push('SMTP is off, so messages were logged only');
+      setNotice(`${parts.join(' · ')}.`);
+      setMessageOpen(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not send the waitlist email.');
+    } finally {
+      setSendingMessage(false);
+    }
+  };
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -111,8 +204,12 @@ export default function AdminLocations() {
         setNotice(`City ${editor.mode === 'new' ? 'created' : 'updated'}.`);
       }
       if (editor.type === 'venue') {
-        if (editor.mode === 'new') await adminCreateVenue(editor.draft);
-        else if (editor.id) await adminUpdateVenue(editor.id, editor.draft);
+        const draft = { ...editor.draft };
+        if (editor.mode === 'new' && !draft.map_url.trim()) {
+          draft.map_url = mapsSearchUrl([draft.name_en, draft.address_en, ...editor.placeNames]);
+        }
+        if (editor.mode === 'new') await adminCreateVenue(draft);
+        else if (editor.id) await adminUpdateVenue(editor.id, draft);
         setNotice(`Venue ${editor.mode === 'new' ? 'created' : 'updated'}.`);
       }
       setEditor(null);
@@ -154,6 +251,9 @@ export default function AdminLocations() {
 
   const toggleState = (id: number) =>
     setExpanded((current) => ({ ...current, [id]: !current[id] }));
+
+  const nextStateSort = () => states.reduce((max, state) => Math.max(max, Number(state.sort_order) || 0), 0) + 10;
+  const nextCitySort = (stateId: number) => ((states.find((state) => state.id === stateId)?.cities.length ?? 0) + 1) * 10;
 
   return (
     <div>
@@ -197,6 +297,14 @@ export default function AdminLocations() {
                 states that have no yatra city yet.
               </p>
             </div>
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            <Button tone="ghost" size="sm" onClick={() => void exportWaitlist()} disabled={exporting || waitlist.length === 0}>
+              <Download size={13} /> {exporting ? 'Building…' : 'Export CSV'}
+            </Button>
+            <Button size="sm" onClick={openMessage} disabled={waitlistStates.every((state) => state.verified === 0)}>
+              <Mail size={13} /> Email verified
+            </Button>
           </div>
         </div>
         {waitlist.length === 0 ? (
@@ -291,6 +399,7 @@ export default function AdminLocations() {
                           type: 'city',
                           mode: 'new',
                           label: state.name_en,
+                          stateCode: state.code,
                           draft: emptyCity(state.id),
                         })
                       }
@@ -349,6 +458,7 @@ export default function AdminLocations() {
                                   type: 'venue',
                                   mode: 'new',
                                   label: `${city.name_en}, ${state.name_en}`,
+                                  placeNames: [city.name_en, state.name_en],
                                   draft: emptyVenue(city.id),
                                 })
                               }
@@ -362,6 +472,7 @@ export default function AdminLocations() {
                                   mode: 'edit',
                                   id: city.id,
                                   label: state.name_en,
+                                  stateCode: state.code,
                                   draft: {
                                     state_id: city.state_id,
                                     name_en: city.name_en,
@@ -422,6 +533,7 @@ export default function AdminLocations() {
                                       mode: 'edit',
                                       id: venue.id,
                                       label: `${city.name_en}, ${state.name_en}`,
+                                      placeNames: [city.name_en, state.name_en],
                                       draft: {
                                         city_id: venue.city_id,
                                         name_en: venue.name_en,
@@ -469,6 +581,59 @@ export default function AdminLocations() {
       )}
 
       <Modal
+        open={messageOpen}
+        onClose={() => setMessageOpen(false)}
+        title="Email the waitlist"
+        subtitle="Only visitors who confirmed their email receive this — pending sign-ups are skipped."
+        footer={
+          <div className="flex justify-end gap-2">
+            <Button tone="ghost" onClick={() => setMessageOpen(false)}>Cancel</Button>
+            <Button onClick={() => void sendMessage()} disabled={sendingMessage || verifiedRecipients === 0}>
+              <Send size={13} /> {sendingMessage ? 'Sending…' : `Send to ${verifiedRecipients}`}
+            </Button>
+          </div>
+        }
+      >
+        <div className="space-y-3">
+          <Field label="Recipients">
+            <Select
+              value={messageStateId}
+              onChange={(e) => setMessageStateId(e.target.value ? Number(e.target.value) : '')}
+            >
+              <option value="">All states</option>
+              {waitlistStates.map((state) => (
+                <option key={state.id} value={state.id}>
+                  {state.name} — {state.verified} verified
+                </option>
+              ))}
+            </Select>
+          </Field>
+          <Field label="Subject" hint="Shown as the email subject line.">
+            <TextInput
+              value={messageSubject}
+              onChange={(e) => setMessageSubject(e.target.value)}
+              maxLength={120}
+              placeholder="Mahi Sundarkand update for your state"
+            />
+          </Field>
+          <Field label="Message" hint="Plain text — line breaks are kept. The footer includes an opt-out line and your support email.">
+            <TextArea
+              rows={7}
+              value={messageBody}
+              onChange={(e) => setMessageBody(e.target.value)}
+              maxLength={4000}
+              placeholder="Radhe Radhe! We are planning the next Mahi Sundarkand cities. Reply to this email with your city so we can plan better."
+            />
+          </Field>
+          <Notice tone="info">
+            {verifiedRecipients === 0
+              ? 'No verified waitlist email matches this selection yet.'
+              : `${verifiedRecipients} verified ${verifiedRecipients === 1 ? 'email' : 'emails'} will receive this. Each send is recorded in the email log and audit trail.`}
+          </Notice>
+        </div>
+      </Modal>
+
+      <Modal
         open={Boolean(editor)}
         onClose={() => setEditor(null)}
         title={
@@ -499,6 +664,28 @@ export default function AdminLocations() {
       >
         {editor?.type === 'state' && (
           <div className="grid gap-3 sm:grid-cols-2">
+            {editor.mode === 'new' && (
+              <StatePicker
+                takenCodes={states.map((state) => state.code)}
+                value={editor.draft.code}
+                onPick={(picked) =>
+                  setEditor(
+                    picked
+                      ? {
+                          ...editor,
+                          draft: {
+                            code: picked.code,
+                            name_en: picked.en,
+                            name_hi: picked.hi,
+                            sort_order: nextStateSort(),
+                            active: editor.draft.active,
+                          },
+                        }
+                      : { ...editor, draft: { ...editor.draft, code: '', name_en: '', name_hi: '' } },
+                  )
+                }
+              />
+            )}
             <Field label="Code" hint="2–8 letters, e.g. RJ, GJ, DL">
               <TextInput
                 value={editor.draft.code}
@@ -536,6 +723,30 @@ export default function AdminLocations() {
 
         {editor?.type === 'city' && (
           <div className="grid gap-3 sm:grid-cols-2">
+            {editor.mode === 'new' && (
+              <CityPicker
+                stateCode={editor.stateCode}
+                takenNames={(states.find((state) => state.code === editor.stateCode)?.cities ?? []).map((city) => city.name_en)}
+                value={editor.draft.name_en}
+                label={`Pick a city in ${editor.label}`}
+                onPick={(picked) =>
+                  setEditor(
+                    picked
+                      ? {
+                          ...editor,
+                          draft: {
+                            state_id: editor.draft.state_id,
+                            name_en: picked.en,
+                            name_hi: picked.hi,
+                            sort_order: nextCitySort(Number(editor.draft.state_id)),
+                            active: editor.draft.active,
+                          },
+                        }
+                      : { ...editor, draft: { ...editor.draft, name_en: '', name_hi: '' } },
+                  )
+                }
+              />
+            )}
             <Field label="City name (English)">
               <TextInput
                 value={editor.draft.name_en}
@@ -591,7 +802,11 @@ export default function AdminLocations() {
                 onChange={(e) => setEditor({ ...editor, draft: { ...editor.draft, address_hi: e.target.value } })}
               />
             </Field>
-            <Field label="Map link" hint="Optional Google Maps URL." className="sm:col-span-2">
+            <Field
+              label="Map link"
+              hint="Leave blank and a Google Maps search link is built from the venue name and address."
+              className="sm:col-span-2"
+            >
               <TextInput
                 value={editor.draft.map_url}
                 onChange={(e) => setEditor({ ...editor, draft: { ...editor.draft, map_url: e.target.value } })}

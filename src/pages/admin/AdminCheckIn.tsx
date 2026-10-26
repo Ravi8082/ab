@@ -14,8 +14,8 @@ import RecentCheckIns from '@/components/staff/RecentCheckIns';
 import { Notice, PageHeader, Stat, formatDateTime } from '@/components/admin/ui';
 
 const REASON_COPY: Record<string, string> = {
-  already_scanned: 'Already scanned today',
-  entries_exhausted: 'All entries used',
+  already_scanned: 'All seats used today',
+  entries_exhausted: 'All event days used',
 };
 
 export default function AdminCheckIn() {
@@ -70,7 +70,7 @@ export default function AdminCheckIn() {
       <PageHeader
         eyebrow="Gate"
         title="Gate check-in"
-        subtitle="Scan a devotee's QR pass or type the reference number. Every code is verified against the booking register and each pass allows entry only once."
+        subtitle="Scan a devotee's QR pass or type the reference number. Every code is verified against the booking register, and each pass admits up to the number of seats booked on every event day it covers."
       />
 
       <div className="mb-5 grid gap-3 sm:grid-cols-3">
@@ -112,7 +112,7 @@ export default function AdminCheckIn() {
                   Duplicate gate attempts today
                 </h2>
                 <p className="text-[0.7rem] text-red-800/80">
-                  Same pass presented again after entry — check the gates before allowing anyone in.
+                  A pass presented after its booked seats were used — check the gates before allowing anyone in.
                 </p>
               </div>
             </div>
@@ -172,8 +172,8 @@ export default function AdminCheckIn() {
             </div>
             <ul className="mt-3 space-y-2 text-xs leading-relaxed text-cream-on-dark/65">
               <li>Only paid passes are allowed through the gate.</li>
-              <li>A pass allows one entry per event day, only for the days it covers. Repeats and extra days are rejected.</li>
-              <li>One QR covers every attendee on that booking.</li>
+              <li>One QR covers every attendee on that booking. Each scan admits one person, up to the seats booked, on every event day the pass covers.</li>
+              <li>Extra scans after all seats have entered, or on a day the pass does not cover, are rejected.</li>
               <li>Fill in your gate name once — every scan is stamped with it, and a QR tried at a second gate is flagged above.</li>
               <li>If a pass fails, send the devotee to the help desk.</li>
             </ul>

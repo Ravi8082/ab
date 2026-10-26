@@ -50,13 +50,15 @@ export default function RecentCheckIns({
                 {formatDateTime(entry.check_in_at)}
                 {Number(entry.entries_allowed) > 1 ? (
                   <>
-                    {' '}· Entry {Number(entry.entry_number)} of {Number(entry.entries_allowed)}
+                    {' '}· seat {Number(entry.entry_number)} of {Number(entry.entries_allowed)} today
+                  </>
+                ) : null}
+                {Number(entry.pass_days) > 1 ? (
+                  <>
+                    {' '}· event day {Number(entry.day_number)} of {Number(entry.calendar_days)}
                   </>
                 ) : Number(entry.calendar_days) > 1 ? (
-                  <>
-                    {' '}· single entry · event day {Number(entry.day_number)} of{' '}
-                    {Number(entry.calendar_days)}
-                  </>
+                  <>{' '}· single-day pass</>
                 ) : null}
               </p>
             </li>

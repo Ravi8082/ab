@@ -10,6 +10,7 @@ import {
   Users,
 } from 'lucide-react';
 import { adminOverview, type AdminOverview } from '@/lib/adminApi';
+import { useBrand } from '@/context/BrandContext';
 import { formatRupees } from '@/lib/pricing';
 import {
   Empty,
@@ -24,6 +25,7 @@ import {
 } from '@/components/admin/ui';
 
 export default function AdminDashboard({ onGoTo }: { onGoTo: (tab: string) => void }) {
+  const { brand } = useBrand();
   const [data, setData] = useState<AdminOverview | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -59,7 +61,7 @@ export default function AdminDashboard({ onGoTo }: { onGoTo: (tab: string) => vo
   return (
     <div>
       <PageHeader
-        eyebrow="Adhyatmik Bharat · Event control"
+        eyebrow={`${brand.name_en} · Event control`}
         title="Dashboard"
         subtitle="Live numbers from the booking database, across every city, venue and ticket type."
         actions={
@@ -208,7 +210,9 @@ export default function AdminDashboard({ onGoTo }: { onGoTo: (tab: string) => vo
                       </span>
                       <div>
                         <p className="font-ui text-[0.84rem] font-semibold text-ink">{event.name_en}</p>
-                        <p className="text-[0.66rem] uppercase tracking-[0.12em] text-muted">{event.kind}</p>
+                        <p className="text-[0.66rem] uppercase tracking-[0.12em] text-muted">
+                          {event.kind_label || event.kind}
+                        </p>
                       </div>
                     </div>
                     <div className="text-right">

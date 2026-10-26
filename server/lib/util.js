@@ -27,3 +27,15 @@ export function makeWaitlistRef() {
 }
 
 export const makeQrToken = () => randomBytes(16).toString('hex');
+
+/** URL slug from a display name — Hindi and accented characters fold to ASCII. */
+export function slugify(value, fallback = 'item') {
+  const slug = String(value || '')
+    .normalize('NFKD')
+    .replace(/[^\x20-\x7E]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 56);
+  return slug || fallback;
+}

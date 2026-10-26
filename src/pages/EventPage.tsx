@@ -24,12 +24,22 @@ import {
   Users,
 } from 'lucide-react';
 import { useApp } from '@/context/AppContext';
+import { useBrand } from '@/context/BrandContext';
 import type { Lang } from '@/types';
 import type { EventPageData, EventTicket } from '@/lib/eventApi';
 import { eventApi } from '@/lib/eventApi';
 import { formatDate, formatDateRange, pickL, seatLabel, seatTone } from '@/lib/eventFormat';
 import { formatRupees } from '@/lib/pricing';
-import { buildContexts, contextFor, findEvent, ticketTotals } from '@/lib/eventView';
+import {
+  buildContexts,
+  contextFor,
+  findEventByLayout,
+  indiaToday,
+  isPastSchedule,
+  sortContexts,
+  ticketTotals,
+  ticketsForLayout,
+} from '@/lib/eventView';
 import type { ScheduleContext } from '@/lib/eventView';
 import SiteHeader from '@/components/SiteHeader';
 import SiteFooter from '@/components/SiteFooter';
@@ -250,6 +260,7 @@ function TicketTierCard({
 
 export default function EventPage() {
   const { lang, reducedMotion } = useApp();
+  const { brand } = useBrand();
   const [data, setData] = useState<EventPageData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -288,10 +299,23 @@ export default function EventPage() {
   }, []);
 
   const contexts = useMemo(() => buildContexts(data), [data]);
-  const yatraContexts = useMemo(() => contexts.filter((context) => context.event.kind === 'yatra'), [contexts]);
-  const expoContext = useMemo(() => contexts.find((context) => context.event.kind === 'expo') ?? null, [contexts]);
-  const yatra = useMemo(() => findEvent(data, 'yatra'), [data]);
-  const expo = useMemo(() => findEvent(data, 'expo'), [data]);
+  const yatraContexts = useMemo(() => contexts.filter((context) => context.event.kind_layout === 'route'), [contexts]);
+  const sortedYatraContexts = useMemo(() => sortContexts(yatraContexts), [yatraContexts]);
+  const today = useMemo(
+    () => indiaToday(data?.serverNow ? new Date(data.serverNow) : new Date()),
+    [data?.serverNow],
+  );
+  const upcomingContexts = useMemo(
+    () => sortedYatraContexts.filter((context) => !isPastSchedule(context.schedule, today)),
+    [sortedYatraContexts, today],
+  );
+  const pastContexts = useMemo(
+    () => sortedYatraContexts.filter((context) => isPastSchedule(context.schedule, today)),
+    [sortedYatraContexts, today],
+  );
+  const expoContext = useMemo(() => contexts.find((context) => context.event.kind_layout === 'single') ?? null, [contexts]);
+  const yatra = useMemo(() => findEventByLayout(data, 'route'), [data]);
+  const expo = useMemo(() => findEventByLayout(data, 'single'), [data]);
 
   const hero = data?.content.hero as HeroContent | undefined;
   const yatraContent = data?.content.yatra as SectionContent | undefined;
@@ -300,15 +324,15 @@ export default function EventPage() {
   const faqContent = data?.content.faq as FaqContent | undefined;
   const contact = data?.content.contact as ContactContent | undefined;
 
-  const yatraCities = new Set(yatraContexts.map((context) => context.city.id)).size;
-  const yatraStates = new Set(yatraContexts.map((context) => context.state.id)).size;
+  const yatraCities = new Set(upcomingContexts.map((context) => context.city.id)).size;
+  const yatraStates = new Set(upcomingContexts.map((context) => context.state.id)).size;
   const lowestPrice = Math.min(
     ...(data?.events.flatMap((event) => event.tickets.map((ticket) => Number(ticket.price))) ?? [0]),
   );
-  const saleEnd = yatraContexts[0]?.schedule.sale_ends_at ?? yatra?.sale_ends_at ?? null;
+  const saleEnd = upcomingContexts[0]?.schedule.sale_ends_at ?? yatra?.sale_ends_at ?? null;
   const expoSaleEnd = expoContext?.schedule.sale_ends_at ?? expo?.sale_ends_at ?? null;
   const selectedContext = contextFor(contexts, selection?.scheduleId ?? null);
-  const yatraTickets = yatra?.tickets ?? [];
+  const yatraTickets = useMemo(() => ticketsForLayout(data, 'route'), [data]);
   const salesPaused = Boolean(data?.sales?.paused);
   const resumeLabel = data?.sales?.resume_at
     ? new Date(String(data.sales.resume_at).replace(' ', 'T')).toLocaleString(lang === 'hi' ? 'hi-IN' : 'en-IN', {
@@ -417,7 +441,7 @@ export default function EventPage() {
               <div className="flex flex-wrap items-center gap-3">
                 <span className="eyebrow eyebrow--light">{pickL(hero?.eyebrow, lang, 'Mahi Sundarkand · 2027')}</span>
                 <span className="hidden h-4 w-px bg-white/20 sm:block" />
-                <span className="font-hindi text-sm text-marigold/90">आध्यात्मिक भारत</span>
+                <span className="font-hindi text-sm text-marigold/90">{brand.name_hi}</span>
               </div>
 
               <h1 className="mt-5 max-w-[15ch] font-display text-[clamp(2.65rem,5vw,4.8rem)] leading-[1.02] text-white">
@@ -497,7 +521,13 @@ export default function EventPage() {
               animate={{ opacity: 1, y: 0, scale: 1 }}
               transition={{ duration: 0.85, delay: 0.2, ease: [0.22, 1, 0.36, 1] }}
             >
-              <QuickBookCard contexts={yatraContexts} lang={lang} onBook={openBooking} paused={salesPaused} />
+              <QuickBookCard
+                contexts={upcomingContexts}
+                states={data?.states ?? []}
+                lang={lang}
+                onBook={openBooking}
+                paused={salesPaused}
+              />
             </motion.div>
           </div>
 
@@ -512,46 +542,24 @@ export default function EventPage() {
           </motion.button>
         </section>
 
-        <div className="relative overflow-hidden border-y border-sky/15 bg-sindoor-deep py-3.5">
-          <div className="marquee flex w-max items-center gap-8">
-            {[...yatraContexts, ...yatraContexts].map((context, index) => (
-              <span key={`${context.venue.id}-${index}`} className="flex shrink-0 items-center gap-8">
-                <span className="inline-flex items-center gap-2 font-ui text-[0.72rem] uppercase tracking-[0.18em] text-cream-on-dark/65">
-                  <span className="h-1.5 w-1.5 rounded-full bg-marigold" />
-                  {lang === 'hi' ? context.city.name_hi : context.city.name_en}
-                  <span className="text-cream-on-dark/30">·</span>
-                  <span className="text-sky">{lang === 'hi' ? context.state.name_hi : context.state.name_en}</span>
+        {upcomingContexts.length > 0 && (
+          <div className="relative overflow-hidden border-y border-sky/15 bg-sindoor-deep py-3.5">
+            <div className="marquee flex w-max items-center gap-8">
+              {[...upcomingContexts, ...upcomingContexts].map((context, index) => (
+                <span key={`${context.venue.id}-${index}`} className="flex shrink-0 items-center gap-8">
+                  <span className="inline-flex items-center gap-2 font-ui text-[0.72rem] uppercase tracking-[0.18em] text-cream-on-dark/65">
+                    <span className="h-1.5 w-1.5 rounded-full bg-marigold" />
+                    {lang === 'hi' ? context.city.name_hi : context.city.name_en}
+                    <span className="text-cream-on-dark/30">·</span>
+                    <span className="text-sky">{lang === 'hi' ? context.state.name_hi : context.state.name_en}</span>
+                  </span>
                 </span>
-              </span>
-            ))}
+              ))}
+            </div>
           </div>
-        </div>
+        )}
 
-        <section id="yatra" className="section section--cream">
-          <div className="wrap section-inner">
-            <SectionHead
-              eyebrow={pickL(yatraContent?.eyebrow, lang, lang === 'hi' ? 'अपना शहर चुनें' : 'Choose your city')}
-              title={pickL(yatraContent?.title, lang, lang === 'hi' ? 'आप पाठ में कहाँ जुड़ेंगे?' : 'Where will you join the path?')}
-              subtitle={pickL(
-                yatraContent?.subtitle,
-                lang,
-                lang === 'hi'
-                  ? 'राज्य चुनें, शहर चुनें और अपने नज़दीकी पते का चयन करें। हर सीट सर्वर पर सुरक्षित है।'
-                  : 'Pick a state, pick a city, and choose the venue closest to you. Every seat is checked on the server.',
-              )}
-              note={pickL(yatraContent?.note, lang)}
-            />
-            <CityExplorer
-              contexts={yatraContexts}
-              states={data?.states ?? []}
-              lang={lang}
-              onBook={openBooking}
-              paused={salesPaused}
-            />
-          </div>
-        </section>
-
-        <section className="section section--tint">
+        <section id="passes" className="section section--tint">
           <div className="wrap section-inner">
             <SectionHead
               eyebrow={lang === 'hi' ? 'पास' : 'Passes'}
@@ -567,7 +575,7 @@ export default function EventPage() {
                 <TicketTierCard
                   key={ticket.id}
                   ticket={ticket}
-                  contexts={yatraContexts}
+                  contexts={upcomingContexts.filter((context) => context.event.id === ticket.event_id)}
                   lang={lang}
                   primary={index === 0}
                   onChooseCity={chooseCity}
@@ -580,6 +588,49 @@ export default function EventPage() {
                 {lang === 'hi' ? 'हमसे संपर्क करें' : 'Talk to our team'}
               </a>
             </p>
+          </div>
+        </section>
+
+        <section id="yatra" className="section section--cream">
+          <div className="wrap section-inner">
+            <SectionHead
+              eyebrow={pickL(yatraContent?.eyebrow, lang, lang === 'hi' ? 'अपना शहर चुनें' : 'Choose your city')}
+              title={pickL(yatraContent?.title, lang, lang === 'hi' ? 'आप पाठ में कहाँ जुड़ेंगे?' : 'Where will you join the path?')}
+              subtitle={pickL(
+                yatraContent?.subtitle,
+                lang,
+                lang === 'hi'
+                  ? 'अपने नज़दीकी शहर और पते का चयन करें। हर सीट सर्वर पर सुरक्षित है।'
+                  : 'Choose the city and venue closest to you. Every seat is checked on the server.',
+              )}
+              note={pickL(yatraContent?.note, lang)}
+            />
+            <CityExplorer
+              contexts={upcomingContexts}
+              lang={lang}
+              onBook={openBooking}
+              paused={salesPaused}
+            />
+            {pastContexts.length > 0 && (
+              <div className="mt-16 border-t border-line pt-12">
+                <SectionHead
+                  eyebrow={lang === 'hi' ? 'बीते कार्यक्रम' : 'Past events'}
+                  title={lang === 'hi' ? 'ये तिथियाँ पूरी हो चुकी हैं' : 'Dates that have already taken place'}
+                  subtitle={
+                    lang === 'hi'
+                      ? 'पुरानी तिथियाँ यहाँ संग्रहित हैं। इनके पास अब उपलब्ध नहीं हैं — ऊपर से आगे की तिथि चुनें।'
+                      : 'Past dates are kept here for reference. Passes are no longer sold for these — pick an upcoming date above.'
+                  }
+                />
+                <CityExplorer
+                  contexts={pastContexts}
+                  lang={lang}
+                  onBook={openBooking}
+                  paused={salesPaused}
+                  past
+                />
+              </div>
+            )}
           </div>
         </section>
 

@@ -1,6 +1,5 @@
 import { randomInt } from 'node:crypto';
 import bcrypt from 'bcryptjs';
-import { config } from '../config.js';
 import { query } from '../db.js';
 import { HttpError, makeWaitlistRef } from './util.js';
 import { sendWaitlistOtpEmail } from './mailer.js';
@@ -16,7 +15,8 @@ export async function loadWaitlistState(stateId) {
 
   const [openRow] = await query(
     `SELECT COUNT(*) AS n FROM event_schedules s
-     JOIN events e ON e.id = s.event_id AND e.active = 1 AND e.kind = 'yatra'
+     JOIN events e ON e.id = s.event_id AND e.active = 1
+       AND e.kind IN (SELECT slug FROM event_kinds WHERE layout = 'route' AND active = 1)
      WHERE s.state_id = ? AND s.active = 1 AND s.event_date >= CURDATE()`,
     [state.id],
   );
@@ -51,8 +51,6 @@ async function issueCode(entry, stateName) {
 
   return {
     delivered: sent.delivered,
-    devMode: config.otpDevMode,
-    devCode: config.otpDevMode ? code : undefined,
   };
 }
 

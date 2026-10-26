@@ -11,6 +11,7 @@ dist
 dist-ssr
 *.local
 server/uploads
+backups
 
 .vscode/*
 !.vscode/extensions.json

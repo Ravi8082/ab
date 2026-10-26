@@ -10,7 +10,9 @@ import {
   Users,
 } from 'lucide-react';
 import {
+  adminCreateCity,
   adminCreateSchedule,
+  adminCreateVenue,
   adminDeleteSchedule,
   adminEvents,
   adminLocations,
@@ -38,6 +40,8 @@ import {
   formatDay,
 } from '@/components/admin/ui';
 import { formatTimeRange } from '@/lib/eventFormat';
+import { CityPicker } from '@/components/admin/PlacePickers';
+import { mapsSearchUrl } from '@/lib/indiaPlaces';
 
 const toTimeInput = (value: string | null) => (value ? value.slice(0, 5) : '');
 const toInputDateTime = (value: string | null) => (value ? value.replace(' ', 'T').slice(0, 16) : '');
@@ -85,6 +89,15 @@ export default function AdminSchedules() {
   const [filterEvent, setFilterEvent] = useState<number | ''>('');
   const [filterState, setFilterState] = useState<number | ''>('');
   const [editor, setEditor] = useState<{ mode: 'new' | 'edit'; id?: number; draft: Draft } | null>(null);
+  const [cityDraft, setCityDraft] = useState<{ name_en: string; name_hi: string } | null>(null);
+  const [venueDraft, setVenueDraft] = useState<{
+    name_en: string;
+    name_hi: string;
+    address_en: string;
+    address_hi: string;
+    map_url: string;
+  } | null>(null);
+  const [addingPlace, setAddingPlace] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -124,6 +137,8 @@ export default function AdminSchedules() {
   );
 
   const openNew = () => {
+    setCityDraft(null);
+    setVenueDraft(null);
     setEditor({ mode: 'new', draft: emptyDraft() });
   };
 
@@ -163,6 +178,84 @@ export default function AdminSchedules() {
     const capacities: Record<number, number> = {};
     for (const ticket of event?.tickets ?? []) capacities[ticket.id] = Number(ticket.default_capacity);
     update({ event_id: eventId, capacities });
+  };
+
+  const reloadLocations = async () => {
+    const locationResult = await adminLocations();
+    setStates(locationResult.states);
+  };
+
+  // A state with no city (or a city with no venue) used to dead-end the schedule form, so the
+  // missing row is created right here and selected once the lists refresh.
+  const createCity = async () => {
+    if (!editor || !editor.draft.state_id || !cityDraft) return;
+    const nameEn = cityDraft.name_en.trim();
+    const nameHi = cityDraft.name_hi.trim();
+    if (nameEn.length < 2) return setError('Enter the city name in English — at least 2 characters.');
+    if (!nameHi) return setError('Enter the city name in हिंदी.');
+
+    setAddingPlace(true);
+    setError('');
+    setNotice('');
+    try {
+      const stateId = Number(editor.draft.state_id);
+      const cities = states.find((state) => state.id === stateId)?.cities.length ?? 0;
+      const created = await adminCreateCity({
+        state_id: stateId,
+        name_en: nameEn,
+        name_hi: nameHi,
+        sort_order: (cities + 1) * 10,
+        active: 1,
+      });
+      await reloadLocations();
+      update({ city_id: created.id, venue_id: '' });
+      setCityDraft(null);
+      setNotice(`${nameEn} added to this state and selected.`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not add the city.');
+    } finally {
+      setAddingPlace(false);
+    }
+  };
+
+  const createVenue = async () => {
+    if (!editor || !editor.draft.city_id || !venueDraft) return;
+    const nameEn = venueDraft.name_en.trim();
+    const nameHi = venueDraft.name_hi.trim();
+    const addressEn = venueDraft.address_en.trim();
+    const addressHi = venueDraft.address_hi.trim();
+    if (nameEn.length < 2) return setError('Enter the venue name in English.');
+    if (!nameHi) return setError('Enter the venue name in हिंदी.');
+    if (addressEn.length < 4) return setError('Enter the venue address in English.');
+    if (!addressHi) return setError('Enter the venue address in हिंदी.');
+
+    setAddingPlace(true);
+    setError('');
+    setNotice('');
+    try {
+      const cityId = Number(editor.draft.city_id);
+      const venues = selectedCity?.venues.length ?? 0;
+      const created = await adminCreateVenue({
+        city_id: cityId,
+        name_en: nameEn,
+        name_hi: nameHi,
+        address_en: addressEn,
+        address_hi: addressHi,
+        map_url:
+          venueDraft.map_url.trim()
+          || mapsSearchUrl([nameEn, addressEn, selectedCity?.name_en, selectedState?.name_en]),
+        sort_order: (venues + 1) * 10,
+        active: 1,
+      });
+      await reloadLocations();
+      update({ venue_id: created.id });
+      setVenueDraft(null);
+      setNotice(`${nameEn} added in ${selectedCity?.name_en} and selected.`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not add the venue.');
+    } finally {
+      setAddingPlace(false);
+    }
   };
 
   const save = async () => {
@@ -301,7 +394,7 @@ export default function AdminSchedules() {
             const closed = schedule.active === 0;
             return (
               <Panel key={schedule.id} className={`overflow-hidden ${closed ? 'opacity-70' : ''}`}>
-                <div className="flex items-start justify-between gap-3 border-b border-line bg-sand-2/50 px-4 py-3">
+                <div className="flex items-start justify-between gap-3 border-b border-line bg-sandal-2/50 px-4 py-3">
                   <div className="flex min-w-0 items-start gap-3">
                     <div className="grid h-12 w-12 shrink-0 place-items-center rounded-xl border border-line bg-white text-center">
                       <div>
@@ -361,7 +454,7 @@ export default function AdminSchedules() {
                     </span>
                     <span>{totalCapacity > 0 ? Math.round((totalSold / totalCapacity) * 100) : 0}%</span>
                   </div>
-                  <div className="h-1.5 overflow-hidden rounded-full bg-sand-2">
+                  <div className="h-1.5 overflow-hidden rounded-full bg-sandal-2">
                     <div
                       className="h-full rounded-full bg-gradient-to-r from-sky via-saffron to-saffron-dark"
                       style={{ width: `${totalCapacity > 0 ? Math.min(100, Math.round((totalSold / totalCapacity) * 100)) : 0}%` }}
@@ -389,7 +482,7 @@ export default function AdminSchedules() {
                   </div>
 
                   {(schedule.note_en || schedule.note_hi) && (
-                    <p className="mt-2 rounded-lg bg-sand-2 px-3 py-2 text-[0.68rem] text-muted">{schedule.note_en || schedule.note_hi}</p>
+                    <p className="mt-2 rounded-lg bg-sandal-2 px-3 py-2 text-[0.68rem] text-muted">{schedule.note_en || schedule.note_hi}</p>
                   )}
                 </div>
               </Panel>
@@ -400,7 +493,11 @@ export default function AdminSchedules() {
 
       <Modal
         open={Boolean(editor)}
-        onClose={() => setEditor(null)}
+        onClose={() => {
+          setEditor(null);
+          setCityDraft(null);
+          setVenueDraft(null);
+        }}
         title={editor?.mode === 'new' ? 'Add schedule' : 'Edit schedule'}
         subtitle="A schedule connects an event to one venue on one date, with seat capacity per ticket."
         wide
@@ -415,6 +512,8 @@ export default function AdminSchedules() {
       >
         {editor && (
           <div className="space-y-4">
+            {error && <Notice tone="error">{error}</Notice>}
+            {notice && <Notice tone="success">{notice}</Notice>}
             <div className="grid gap-3 sm:grid-cols-2">
               <Field label="Event">
                 <Select
@@ -438,29 +537,163 @@ export default function AdminSchedules() {
                   ))}
                 </Select>
               </Field>
-              <Field label="City">
-                <Select
-                  value={editor.draft.city_id}
-                  onChange={(e) => update({ city_id: Number(e.target.value), venue_id: '' })}
-                  disabled={!selectedState}
-                >
-                  <option value="">Choose a city</option>
-                  {(selectedState?.cities ?? []).map((city) => (
-                    <option key={city.id} value={city.id}>{city.name_en}</option>
-                  ))}
-                </Select>
+              <Field
+                label="City"
+                hint={
+                  selectedState && selectedState.cities.length === 0
+                    ? `${selectedState.name_en} has no city yet — add one with “New city”.`
+                    : undefined
+                }
+              >
+                <div className="flex gap-2">
+                  <Select
+                    value={editor.draft.city_id}
+                    onChange={(e) => update({ city_id: Number(e.target.value), venue_id: '' })}
+                    disabled={!selectedState}
+                    className="min-w-0 flex-1"
+                  >
+                    <option value="">Choose a city</option>
+                    {(selectedState?.cities ?? []).map((city) => (
+                      <option key={city.id} value={city.id}>{city.name_en}</option>
+                    ))}
+                  </Select>
+                  <Button
+                    tone="ghost"
+                    type="button"
+                    className="shrink-0"
+                    disabled={!selectedState || addingPlace}
+                    onClick={() => setCityDraft(cityDraft ? null : { name_en: '', name_hi: '' })}
+                  >
+                    <Plus size={13} /> New city
+                  </Button>
+                </div>
+                {cityDraft && (
+                  <div className="mt-2 grid gap-2 rounded-xl border border-line bg-sandal-2/60 p-3 sm:grid-cols-2">
+                    <div className="sm:col-span-2">
+                      <CityPicker
+                        stateCode={selectedState?.code ?? ''}
+                        takenNames={(selectedState?.cities ?? []).map((city) => city.name_en)}
+                        value={cityDraft.name_en}
+                        label={`Pick a city in ${selectedState?.name_en ?? 'this state'}`}
+                        onPick={(picked) =>
+                          setCityDraft(picked ? { name_en: picked.en, name_hi: picked.hi } : { name_en: '', name_hi: '' })
+                        }
+                      />
+                    </div>
+                    <Field label="City name (English)">
+                      <TextInput
+                        value={cityDraft.name_en}
+                        placeholder="Kochi"
+                        onChange={(e) => setCityDraft({ ...cityDraft, name_en: e.target.value })}
+                      />
+                    </Field>
+                    <Field label="City name (हिंदी)">
+                      <TextInput
+                        value={cityDraft.name_hi}
+                        placeholder="कोच्चि"
+                        onChange={(e) => setCityDraft({ ...cityDraft, name_hi: e.target.value })}
+                      />
+                    </Field>
+                    <div className="flex items-center justify-end gap-2 sm:col-span-2">
+                      <Button tone="ghost" size="sm" type="button" onClick={() => setCityDraft(null)}>
+                        Cancel
+                      </Button>
+                      <Button size="sm" type="button" disabled={addingPlace} onClick={() => void createCity()}>
+                        {addingPlace ? 'Adding…' : 'Add city'}
+                      </Button>
+                    </div>
+                  </div>
+                )}
               </Field>
-              <Field label="Venue address">
-                <Select
-                  value={editor.draft.venue_id}
-                  onChange={(e) => update({ venue_id: Number(e.target.value) })}
-                  disabled={!selectedCity}
-                >
-                  <option value="">Choose a venue</option>
-                  {(selectedCity?.venues ?? []).map((venue) => (
-                    <option key={venue.id} value={venue.id}>{venue.name_en}</option>
-                  ))}
-                </Select>
+              <Field
+                label="Venue address"
+                hint={
+                  selectedCity && selectedCity.venues.length === 0
+                    ? `${selectedCity.name_en} has no venue yet — add one with “New venue”.`
+                    : undefined
+                }
+              >
+                <div className="flex gap-2">
+                  <Select
+                    value={editor.draft.venue_id}
+                    onChange={(e) => update({ venue_id: Number(e.target.value) })}
+                    disabled={!selectedCity}
+                    className="min-w-0 flex-1"
+                  >
+                    <option value="">Choose a venue</option>
+                    {(selectedCity?.venues ?? []).map((venue) => (
+                      <option key={venue.id} value={venue.id}>{venue.name_en}</option>
+                    ))}
+                  </Select>
+                  <Button
+                    tone="ghost"
+                    type="button"
+                    className="shrink-0"
+                    disabled={!selectedCity || addingPlace}
+                    onClick={() =>
+                      setVenueDraft(
+                        venueDraft
+                          ? null
+                          : { name_en: '', name_hi: '', address_en: '', address_hi: '', map_url: '' },
+                      )
+                    }
+                  >
+                    <Plus size={13} /> New venue
+                  </Button>
+                </div>
+                {venueDraft && (
+                  <div className="mt-2 space-y-2 rounded-xl border border-line bg-sandal-2/60 p-3">
+                    <div className="grid gap-2 sm:grid-cols-2">
+                      <Field label="Venue name (English)">
+                        <TextInput
+                          value={venueDraft.name_en}
+                          placeholder="Sundar Bhavan Hall"
+                          onChange={(e) => setVenueDraft({ ...venueDraft, name_en: e.target.value })}
+                        />
+                      </Field>
+                      <Field label="Venue name (हिंदी)">
+                        <TextInput
+                          value={venueDraft.name_hi}
+                          placeholder="सुंदर भवन हॉल"
+                          onChange={(e) => setVenueDraft({ ...venueDraft, name_hi: e.target.value })}
+                        />
+                      </Field>
+                      <Field label="Address (English)" className="sm:col-span-2">
+                        <TextInput
+                          value={venueDraft.address_en}
+                          placeholder="MG Road, near the railway station, Kochi 682001"
+                          onChange={(e) => setVenueDraft({ ...venueDraft, address_en: e.target.value })}
+                        />
+                      </Field>
+                      <Field label="Address (हिंदी)" className="sm:col-span-2">
+                        <TextInput
+                          value={venueDraft.address_hi}
+                          placeholder="एमजी रोड, रेलवे स्टेशन के पास, कोच्चि 682001"
+                          onChange={(e) => setVenueDraft({ ...venueDraft, address_hi: e.target.value })}
+                        />
+                      </Field>
+                      <Field
+                        label="Map link"
+                        hint="Optional — leave blank and a Google Maps search link is built from the address."
+                        className="sm:col-span-2"
+                      >
+                        <TextInput
+                          value={venueDraft.map_url}
+                          placeholder="https://maps.google.com/?cid=…"
+                          onChange={(e) => setVenueDraft({ ...venueDraft, map_url: e.target.value })}
+                        />
+                      </Field>
+                    </div>
+                    <div className="flex items-center justify-end gap-2">
+                      <Button tone="ghost" size="sm" type="button" onClick={() => setVenueDraft(null)}>
+                        Cancel
+                      </Button>
+                      <Button size="sm" type="button" disabled={addingPlace} onClick={() => void createVenue()}>
+                        {addingPlace ? 'Adding…' : 'Add venue'}
+                      </Button>
+                    </div>
+                  </div>
+                )}
               </Field>
               <Field label="Event date">
                 <TextInput
@@ -519,10 +752,15 @@ export default function AdminSchedules() {
               </Field>
             </div>
 
-            <div className="rounded-xl border border-line bg-sand-2/60 p-4">
+            <div className="rounded-xl border border-line bg-sandal-2/60 p-4">
               <p className="font-ui text-[0.64rem] uppercase tracking-[0.14em] text-muted">Seat capacity at this venue</p>
               {!selectedEvent ? (
                 <p className="mt-2 text-xs text-muted">Choose an event to set capacity per ticket.</p>
+              ) : selectedEvent.tickets.length === 0 ? (
+                <p className="mt-2 text-xs text-muted">
+                  {selectedEvent.name_en} has no ticket types yet. Add them in Events &amp; tickets first, then come
+                  back to set the seats for this venue.
+                </p>
               ) : (
                 <div className="mt-3 grid gap-2 sm:grid-cols-2">
                   {selectedEvent.tickets.map((ticket) => (

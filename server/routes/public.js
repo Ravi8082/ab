@@ -2,6 +2,7 @@ import { Router } from 'express';
 import rateLimit from 'express-rate-limit';
 import bcrypt from 'bcryptjs';
 import crypto from 'node:crypto';
+import path from 'node:path';
 import { z } from 'zod';
 import { pingDatabase, pool, query, withTransaction } from '../db.js';
 import { config } from '../config.js';
@@ -15,6 +16,7 @@ import {
   soldBySchedule,
 } from '../lib/eventBookings.js';
 import { getGateSettings, getSalesSettings, isSalesClosed, publicSalesState } from '../lib/settings.js';
+import { brandImage, getBrand, publicBrand, resolveBrandFile } from '../lib/brand.js';
 import { effectiveUnitPrice, priceOnDate, priceSlabsByTicket } from '../lib/ticketPricing.js';
 import { joinWaitlist, resendWaitlistCode, verifyWaitlistCode } from '../lib/waitlist.js';
 import { issuePassCode } from '../lib/passCodes.js';
@@ -159,7 +161,7 @@ publicRouter.get(
       const now = new Date();
       const [
         contentRows, eventRows, ticketRows, stateRows, cityRows, venueRows,
-        scheduleRows, capacityRows, slabsByTicket, sold,
+        scheduleRows, capacityRows, slabsByTicket, sold, kindRows,
       ] =
         await Promise.all([
           query('SELECT content_key, value_json FROM event_content'),
@@ -180,7 +182,7 @@ publicRouter.get(
                     (s.event_date < CURDATE()) AS date_passed
              FROM event_schedules s JOIN events e ON e.id = s.event_id
              WHERE s.active = 1 AND e.active = 1
-             ORDER BY s.event_date, s.id`,
+             ORDER BY s.event_date, s.start_time, s.id`,
           ),
           query(
             `SELECT cap.schedule_id, cap.ticket_type_id, cap.capacity
@@ -189,6 +191,7 @@ publicRouter.get(
           ),
           priceSlabsByTicket(),
           soldBySchedule(),
+          query('SELECT slug, label_en, label_hi, layout FROM event_kinds ORDER BY sort_order, slug'),
         ]);
 
       const ticketsByEvent = new Map();
@@ -201,10 +204,18 @@ publicRouter.get(
         });
       }
 
-      const events = eventRows.map((event) => ({
-        ...event,
-        tickets: ticketsByEvent.get(event.id) || [],
-      }));
+      const kindsBySlug = new Map(kindRows.map((kind) => [kind.slug, kind]));
+      const events = eventRows.map((event) => {
+        const kind = kindsBySlug.get(event.kind);
+        return {
+          ...event,
+          kind_label: kind?.label_en ?? event.kind,
+          kind_label_hi: kind?.label_hi ?? event.kind,
+          // Older rows without a kind row still need a layout, or they would vanish from the page.
+          kind_layout: kind?.layout ?? (event.kind === 'expo' ? 'single' : 'route'),
+          tickets: ticketsByEvent.get(event.id) || [],
+        };
+      });
 
       const capacitiesBySchedule = new Map();
       for (const capacity of capacityRows) {
@@ -261,6 +272,33 @@ publicRouter.get(
   }),
 );
 
+publicRouter.get(
+  '/brand',
+  asyncHandler(async (_req, res) => {
+    const brand = await getBrand();
+    res.set('Cache-Control', 'public, max-age=30, stale-while-revalidate=120');
+    res.json({ brand: publicBrand(brand) });
+  }),
+);
+
+publicRouter.get(
+  '/brand/image/:field',
+  asyncHandler(async (req, res) => {
+    const brand = await getBrand();
+    const image = brandImage(brand, req.params.field);
+    const absolute = resolveBrandFile(image?.path);
+    if (!absolute) throw new HttpError(404, 'No image uploaded for this yet.');
+
+    // Uploaded bytes are named per upload, so a new image always arrives on a new URL.
+    res.setHeader('Content-Type', image.mime);
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+    res.setHeader('Content-Disposition', `inline; filename="${path.basename(absolute)}"`);
+    res.sendFile(absolute);
+  }),
+);
+
 const LEGAL_PAGES = {
   terms: 'legal_terms',
   privacy: 'legal_privacy',
@@ -309,8 +347,6 @@ publicRouter.post(
       verified: result.alreadyVerified,
       nextStep: result.alreadyVerified ? 'done' : 'otp',
       delivered: result.alreadyVerified ? undefined : result.delivered,
-      devMode: result.alreadyVerified ? undefined : result.devMode,
-      devCode: result.alreadyVerified ? undefined : result.devCode,
     });
   }),
 );
@@ -325,8 +361,6 @@ publicRouter.post(
       verified: result.alreadyVerified,
       nextStep: result.alreadyVerified ? 'done' : 'otp',
       delivered: result.alreadyVerified ? undefined : result.delivered,
-      devMode: result.alreadyVerified ? undefined : result.devMode,
-      devCode: result.alreadyVerified ? undefined : result.devCode,
     });
   }),
 );
@@ -579,7 +613,7 @@ publicRouter.post(
     );
     if (recent) throw new HttpError(429, 'Please wait a moment before asking for another code.');
 
-    const code = String(Math.floor(100000 + Math.random() * 900000));
+    const code = String(crypto.randomInt(100000, 1000000));
     const hash = await bcrypt.hash(code, 10);
     await query(
       `INSERT INTO event_booking_otps (booking_id, code_hash, expires_at)
@@ -596,8 +630,6 @@ publicRouter.post(
 
     res.json({
       sent: sent.delivered,
-      devMode: config.otpDevMode,
-      devCode: config.otpDevMode ? code : undefined,
     });
   }),
 );

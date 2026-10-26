@@ -1,5 +1,6 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  ArrowRightLeft,
   Ban,
   ChevronDown,
   ChevronRight,
@@ -10,24 +11,33 @@ import {
   Gift,
   Pencil,
   RefreshCw,
+  RotateCcw,
   Search,
+  Send,
   ShieldOff,
   Users,
+  XCircle,
 } from 'lucide-react';
 import {
+  adminAmendBooking,
+  adminAmendOptions,
   adminBookings,
+  adminCancelBooking,
   adminCreateEntryBlock,
   adminDownloadBookings,
   adminEntryBlocks,
   adminEvents,
   adminIssueBooking,
   adminLocations,
+  adminRefundBooking,
+  adminResendPass,
   adminSchedules,
   adminSetEntryBlock,
   adminUpdateBooking,
   type AdminBooking,
   type AdminSchedule,
   type AdminState,
+  type AmendOptions,
   type BookingFilters,
   type BookingSummary,
   type EntryBlock,
@@ -805,6 +815,594 @@ function BlockEntryDialog({
   );
 }
 
+function ResendPassDialog({
+  booking,
+  onClose,
+  onSaved,
+}: {
+  booking: AdminBooking | null;
+  onClose: () => void;
+  onSaved: (message: string) => void;
+}) {
+  const [email, setEmail] = useState('');
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    if (!booking) return;
+    setEmail(booking.email);
+    setError('');
+  }, [booking]);
+
+  if (!booking) return null;
+
+  const submit = async () => {
+    if (!emailOk(email)) {
+      setError('Enter a valid email address for the pass.');
+      return;
+    }
+    setSending(true);
+    setError('');
+    try {
+      const corrected = email.trim().toLowerCase() !== booking.email.trim().toLowerCase();
+      const result = await adminResendPass(booking.id, corrected ? email.trim() : undefined);
+      onSaved(
+        result.delivered
+          ? `The existing pass and PDF were resent to ${result.to}.`
+          : 'SMTP is not configured on this server, so the pass was logged instead of emailed. Add the SMTP settings in .env to deliver it.',
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not resend the pass.');
+    } finally {
+      setSending(false);
+    }
+  };
+
+  return (
+    <Modal
+      open
+      onClose={sending ? () => undefined : onClose}
+      title={`Resend pass — ${booking.reference}`}
+      subtitle="Sends the same QR and PDF pass that was already issued. This does not create a new booking or a free pass."
+      footer={
+        <div className="flex items-center justify-end gap-2">
+          <Button tone="ghost" onClick={onClose} disabled={sending}>
+            Close
+          </Button>
+          <Button onClick={() => void submit()} disabled={sending}>
+            <Send size={13} /> {sending ? 'Sending…' : 'Resend pass'}
+          </Button>
+        </div>
+      }
+    >
+      <div className="space-y-4">
+        {error && <Notice tone="error">{error}</Notice>}
+
+        <div className="rounded-xl border border-line bg-white px-4 py-3 text-sm">
+          <p className="font-ui font-semibold text-ink">{booking.name}</p>
+          <p className="text-[0.72rem] text-muted">
+            {booking.event_en} · {booking.ticket_en} · {formatDay(booking.event_date)}
+          </p>
+          <p className="mt-1 text-[0.72rem] text-muted">
+            Last sent: {booking.pass_sent_at ? formatDateTime(booking.pass_sent_at) : 'not recorded'}
+          </p>
+        </div>
+
+        <Field
+          label="Send to"
+          hint="Change this only if the devotee gave a corrected email address"
+        >
+          <TextInput
+            type="email"
+            value={email}
+            onChange={(event) => setEmail(event.target.value)}
+            placeholder="name@example.com"
+          />
+        </Field>
+      </div>
+    </Modal>
+  );
+}
+
+function AmendBookingDialog({
+  booking,
+  onClose,
+  onSaved,
+}: {
+  booking: AdminBooking | null;
+  onClose: () => void;
+  onSaved: (message: string) => void;
+}) {
+  const [options, setOptions] = useState<AmendOptions | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState('');
+  const [scheduleId, setScheduleId] = useState('');
+  const [ticketTypeId, setTicketTypeId] = useState('');
+  const [qty, setQty] = useState(1);
+  const [roster, setRoster] = useState<RosterRow[]>([]);
+  const [reason, setReason] = useState('');
+  const [paymentReference, setPaymentReference] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    if (!booking) return;
+    setOptions(null);
+    setLoadError('');
+    setError('');
+    setReason('');
+    setPaymentReference('');
+    setQty(Number(booking.qty));
+    setRoster(rosterForBooking(booking));
+    setLoading(true);
+    adminAmendOptions(booking.id)
+      .then((result) => {
+        setOptions(result);
+        setScheduleId(String(result.booking.scheduleId));
+        setTicketTypeId(String(result.booking.ticketTypeId));
+      })
+      .catch((err) => setLoadError(err instanceof Error ? err.message : 'Could not load change options.'))
+      .finally(() => setLoading(false));
+  }, [booking]);
+
+  if (!booking) return null;
+
+  const selectedSchedule = options?.schedules.find((item) => String(item.scheduleId) === scheduleId) ?? null;
+  const selectedTicket =
+    selectedSchedule?.tickets.find((item) => String(item.ticketTypeId) === ticketTypeId) ?? null;
+
+  const changeQty = (value: number) => {
+    const next = Math.max(1, Math.min(20, Number.isFinite(value) ? Math.round(value) : 1));
+    setQty(next);
+    setRoster((rows) => resizeRoster(rows, next - 1));
+  };
+
+  const discount = options ? Math.min(options.booking.discountAmount, (selectedTicket?.price ?? 0) * qty) : 0;
+  const newAmount = options && selectedTicket ? selectedTicket.price * qty - discount : 0;
+  const difference = options ? newAmount - options.booking.amount : 0;
+
+  const submit = async () => {
+    if (!options || !selectedSchedule || !selectedTicket) {
+      setError('Choose the city, date and ticket for the updated pass.');
+      return;
+    }
+    if (reason.trim().length < 3) {
+      setError('Write a short reason for the change.');
+      return;
+    }
+    if (qty > selectedTicket.left) {
+      setError(`Only ${selectedTicket.left} seat(s) left for that ticket.`);
+      return;
+    }
+    if (difference > 0 && !paymentReference.trim()) {
+      setError(
+        `The updated pass costs ₹${difference.toLocaleString('en-IN')} more. Collect the difference and enter its payment reference.`,
+      );
+      return;
+    }
+    for (let index = 0; index < roster.length; index += 1) {
+      const person = roster[index];
+      if (person.name.trim().length < 2) {
+        setError(`Enter the full name for attendee ${index + 2}.`);
+        return;
+      }
+      if (!phoneOk(person.phone)) {
+        setError(`Enter a valid 10-digit mobile number for attendee ${index + 2}.`);
+        return;
+      }
+      if (person.email.trim() && !emailOk(person.email)) {
+        setError(`The email for attendee ${index + 2} is not valid.`);
+        return;
+      }
+    }
+
+    setSaving(true);
+    setError('');
+    try {
+      const result = await adminAmendBooking(booking.id, {
+        scheduleId: selectedSchedule.scheduleId,
+        ticketTypeId: selectedTicket.ticketTypeId,
+        qty,
+        reason: reason.trim(),
+        paymentReference: paymentReference.trim() || undefined,
+        attendees: roster.map((person) => ({
+          name: person.name.trim(),
+          phone: person.phone.trim(),
+          email: person.email.trim() || undefined,
+        })),
+      });
+      const money = (value: number) => `₹${Math.abs(value).toLocaleString('en-IN')}`;
+      onSaved(
+        result.difference > 0
+          ? `${booking.reference} updated. ${money(result.difference)} extra recorded and a new QR was reissued.`
+          : result.difference < 0
+            ? `${booking.reference} updated. The new fare is ${money(result.difference)} lower — record a refund if one is due.`
+            : `${booking.reference} updated and a new QR was reissued.`,
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not change this booking.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Modal
+      open
+      onClose={saving ? () => undefined : onClose}
+      title={`Change booking — ${booking.reference}`}
+      subtitle="Move the pass to another city or date, change the ticket or seat count. A new QR is issued and the old pass stops working."
+      wide
+      footer={
+        <div className="flex items-center justify-end gap-2">
+          <Button tone="ghost" onClick={onClose} disabled={saving}>
+            Close
+          </Button>
+          <Button onClick={() => void submit()} disabled={saving || loading || !options}>
+            {saving ? 'Reissuing…' : 'Save & reissue pass'}
+          </Button>
+        </div>
+      }
+    >
+      <div className="space-y-4">
+        {error && <Notice tone="error">{error}</Notice>}
+        {loadError && <Notice tone="error">{loadError}</Notice>}
+        {loading && <Spinner label="Loading available cities and fares" />}
+
+        <div className="rounded-xl border border-line bg-white px-4 py-3 text-sm">
+          <p className="font-ui font-semibold text-ink">{booking.name}</p>
+          <p className="mt-1 text-[0.72rem] text-muted">
+            {booking.event_en} · {booking.ticket_en} · {formatDay(booking.event_date)} · {booking.qty} seat
+            {booking.qty === 1 ? '' : 's'} · paid {formatRupees(Number(booking.amount))}
+          </p>
+        </div>
+
+        {options && (
+          <>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <Field label="City & date">
+                <Select
+                  value={scheduleId}
+                  onChange={(event) => {
+                    setScheduleId(event.target.value);
+                    const next = options.schedules.find((item) => String(item.scheduleId) === event.target.value);
+                    setTicketTypeId(next?.tickets[0] ? String(next.tickets[0].ticketTypeId) : '');
+                  }}
+                >
+                  {options.schedules.map((item) => (
+                    <option key={item.scheduleId} value={item.scheduleId}>
+                      {item.city_en} · {formatDay(item.eventDate)} · {item.venue_en}
+                    </option>
+                  ))}
+                </Select>
+              </Field>
+              <Field label="Ticket" hint={selectedTicket ? `${selectedTicket.left} seat(s) left` : undefined}>
+                <Select
+                  value={ticketTypeId}
+                  onChange={(event) => setTicketTypeId(event.target.value)}
+                >
+                  {(selectedSchedule?.tickets ?? []).map((ticket) => (
+                    <option key={ticket.ticketTypeId} value={ticket.ticketTypeId}>
+                      {ticket.name_en} · {formatRupees(ticket.price)}
+                    </option>
+                  ))}
+                </Select>
+              </Field>
+              <Field label="Seats" hint="1 to 20">
+                <TextInput
+                  type="number"
+                  min={1}
+                  max={20}
+                  value={qty}
+                  onChange={(event) => changeQty(Number(event.target.value))}
+                />
+              </Field>
+              <Field label="Reason" hint="Recorded in the audit log">
+                <TextInput
+                  value={reason}
+                  onChange={(event) => setReason(event.target.value)}
+                  maxLength={255}
+                  placeholder="e.g. Devotee moved to the Pune date"
+                />
+              </Field>
+            </div>
+
+            {selectedTicket && (
+              <div className="rounded-xl border border-line bg-sandal-2/40 px-4 py-3 text-[0.76rem]">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-muted">
+                    New fare: {formatRupees(selectedTicket.price)} × {qty}
+                    {discount > 0 ? ` − ${formatRupees(discount)} discount` : ''}
+                  </span>
+                  <span className="font-ui font-semibold text-ink">{formatRupees(Math.max(0, newAmount))}</span>
+                </div>
+                <p className="mt-1 font-ui font-semibold">
+                  {difference > 0 ? (
+                    <span className="text-amber-700">
+                      Collect {formatRupees(difference)} extra from the devotee.
+                    </span>
+                  ) : difference < 0 ? (
+                    <span className="text-emerald-700">
+                      {formatRupees(Math.abs(difference))} lower than the amount paid — record a refund if due.
+                    </span>
+                  ) : (
+                    <span className="text-muted">No payment difference.</span>
+                  )}
+                </p>
+                {selectedTicket.passDays > 1 && (
+                  <p className="mt-1 text-muted">
+                    Pass duration: {selectedTicket.passDays} days for this city.
+                  </p>
+                )}
+              </div>
+            )}
+
+            {difference > 0 && (
+              <Field
+                label="Payment reference for the difference"
+                hint="Required — UPI / bank UTR / cash receipt number"
+              >
+                <TextInput
+                  value={paymentReference}
+                  onChange={(event) => setPaymentReference(event.target.value)}
+                  maxLength={120}
+                  placeholder="e.g. UPI 1234567890"
+                />
+              </Field>
+            )}
+
+            {qty > 1 && (
+              <div className="rounded-xl border border-line bg-white p-4">
+                <p className="mb-3 font-ui text-[0.64rem] uppercase tracking-[0.14em] text-muted">
+                  Other attendees ({qty - 1})
+                </p>
+                <div className="space-y-3">
+                  {roster.map((person, index) => (
+                    <div key={index} className="grid gap-2 sm:grid-cols-[1.2fr_1fr_1.2fr]">
+                      <TextInput
+                        value={person.name}
+                        onChange={(event) =>
+                          setRoster((rows) =>
+                            rows.map((row, rowIndex) =>
+                              rowIndex === index ? { ...row, name: event.target.value } : row,
+                            ),
+                          )
+                        }
+                        placeholder="Full name"
+                      />
+                      <TextInput
+                        value={person.phone}
+                        onChange={(event) =>
+                          setRoster((rows) =>
+                            rows.map((row, rowIndex) =>
+                              rowIndex === index
+                                ? { ...row, phone: event.target.value.replace(/\D/g, '').slice(0, 10) }
+                                : row,
+                            ),
+                          )
+                        }
+                        placeholder="Mobile"
+                        inputMode="numeric"
+                      />
+                      <TextInput
+                        type="email"
+                        value={person.email}
+                        onChange={(event) =>
+                          setRoster((rows) =>
+                            rows.map((row, rowIndex) =>
+                              rowIndex === index ? { ...row, email: event.target.value } : row,
+                            ),
+                          )
+                        }
+                        placeholder="Email (optional)"
+                      />
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </Modal>
+  );
+}
+
+function CancelRefundDialog({
+  booking,
+  onClose,
+  onSaved,
+}: {
+  booking: AdminBooking | null;
+  onClose: () => void;
+  onSaved: (message: string) => void;
+}) {
+  const [reason, setReason] = useState('');
+  const [refundAmount, setRefundAmount] = useState('0');
+  const [refundReference, setRefundReference] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  const refundOnly = booking?.status === 'cancelled';
+
+  useEffect(() => {
+    if (!booking) return;
+    setReason('');
+    setRefundAmount(
+      booking.status === 'paid' && Number(booking.amount) > 0 ? String(Number(booking.amount)) : '0',
+    );
+    setRefundReference('');
+    setError('');
+  }, [booking]);
+
+  if (!booking) return null;
+
+  const paidAmount = Number(booking.amount) || 0;
+  const canRefund = booking.status === 'paid' && paidAmount > 0;
+  const refundValue = Math.max(0, Math.floor(Number(refundAmount) || 0));
+
+  const submit = async () => {
+    setError('');
+    if (refundOnly) {
+      if (refundValue <= 0) {
+        setError('Enter the refund amount being returned.');
+        return;
+      }
+      if (refundValue > paidAmount) {
+        setError(`The refund cannot exceed the paid amount of ₹${paidAmount.toLocaleString('en-IN')}.`);
+        return;
+      }
+      setSaving(true);
+      try {
+        await adminRefundBooking(booking.id, {
+          refundAmount: refundValue,
+          refundReference: refundReference.trim() || undefined,
+        });
+        onSaved(`Refund of ₹${refundValue.toLocaleString('en-IN')} recorded for ${booking.reference}.`);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Could not record the refund.');
+      } finally {
+        setSaving(false);
+      }
+      return;
+    }
+
+    if (reason.trim().length < 3) {
+      setError('Write a short cancellation reason.');
+      return;
+    }
+    if (canRefund && refundValue > paidAmount) {
+      setError(`The refund cannot exceed the paid amount of ₹${paidAmount.toLocaleString('en-IN')}.`);
+      return;
+    }
+    if (!canRefund && refundValue > 0) {
+      setError('This booking has no captured payment, so there is nothing to refund.');
+      return;
+    }
+
+    setSaving(true);
+    try {
+      await adminCancelBooking(booking.id, {
+        reason: reason.trim(),
+        refundAmount: refundValue,
+        refundReference: refundReference.trim() || undefined,
+      });
+      onSaved(
+        refundValue > 0
+          ? `${booking.reference} cancelled and a ₹${refundValue.toLocaleString('en-IN')} refund recorded.`
+          : `${booking.reference} cancelled. The QR pass is no longer valid at the gate.`,
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not cancel this booking.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Modal
+      open
+      onClose={saving ? () => undefined : onClose}
+      title={refundOnly ? `Record refund — ${booking.reference}` : `Cancel booking — ${booking.reference}`}
+      subtitle={
+        refundOnly
+          ? 'This booking is already cancelled. Record the money returned to the devotee.'
+          : 'Cancelling closes the pass and releases its seats. The QR stops working at the gate immediately.'
+      }
+      footer={
+        <div className="flex items-center justify-end gap-2">
+          <Button tone="ghost" onClick={onClose} disabled={saving}>
+            Close
+          </Button>
+          <Button tone="danger" onClick={() => void submit()} disabled={saving}>
+            {saving
+              ? 'Saving…'
+              : refundOnly
+                ? 'Record refund'
+                : refundValue > 0
+                  ? `Cancel & refund ₹${refundValue.toLocaleString('en-IN')}`
+                  : 'Cancel booking'}
+          </Button>
+        </div>
+      }
+    >
+      <div className="space-y-4">
+        {error && <Notice tone="error">{error}</Notice>}
+
+        <div className="rounded-xl border border-line bg-white px-4 py-3 text-sm">
+          <p className="font-ui font-semibold text-ink">{booking.name}</p>
+          <p className="text-[0.72rem] text-muted">
+            {booking.phone} · {booking.email}
+          </p>
+          <p className="mt-1 text-[0.72rem] text-muted">
+            {booking.event_en} · {booking.ticket_en} · {formatDay(booking.event_date)} · {booking.qty} seat
+            {booking.qty === 1 ? '' : 's'}
+          </p>
+          <p className="mt-1 text-[0.72rem] text-muted">
+            Paid amount: <span className="font-semibold text-ink">₹{paidAmount.toLocaleString('en-IN')}</span>
+          </p>
+          {refundOnly && booking.cancel_reason && (
+            <p className="mt-1 text-[0.72rem] text-muted">
+              Cancellation reason: <span className="text-ink">{booking.cancel_reason}</span>
+            </p>
+          )}
+        </div>
+
+        {!refundOnly && (
+          <Notice tone="info">
+            The devotee receives a cancellation email. If a refund is recorded, the email says it will reach
+            them within 15 working days, as promised in the refund policy.
+          </Notice>
+        )}
+
+        {!refundOnly && (
+          <Field label="Cancellation reason" hint="Stored in the audit log and sent to the devotee">
+            <TextArea
+              value={reason}
+              onChange={(event) => setReason(event.target.value)}
+              maxLength={255}
+              placeholder="e.g. Devotee requested cancellation on phone"
+            />
+          </Field>
+        )}
+
+        {(canRefund || refundOnly) && (
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field
+              label="Refund amount (₹)"
+              hint={
+                refundOnly
+                  ? `Paid amount ₹${paidAmount.toLocaleString('en-IN')}`
+                  : 'Set 0 to cancel without a refund; you can record it later from this row.'
+              }
+            >
+              <TextInput
+                type="number"
+                min={refundOnly ? 1 : 0}
+                max={paidAmount}
+                value={refundAmount}
+                onChange={(event) => setRefundAmount(event.target.value)}
+              />
+            </Field>
+            <Field label="Refund reference" hint="UPI / bank UTR / Razorpay refund ID">
+              <TextInput
+                value={refundReference}
+                onChange={(event) => setRefundReference(event.target.value)}
+                maxLength={120}
+                placeholder="Optional"
+              />
+            </Field>
+          </div>
+        )}
+
+        {!canRefund && !refundOnly && (
+          <Notice tone="info">No payment was captured on this booking, so no refund is due.</Notice>
+        )}
+      </div>
+    </Modal>
+  );
+}
+
 export default function AdminBookings() {
   const [filters, setFilters] = useState<BookingFilters>(EMPTY_FILTERS);
   const [bookings, setBookings] = useState<AdminBooking[]>([]);
@@ -822,6 +1420,9 @@ export default function AdminBookings() {
   const [exporting, setExporting] = useState<'xlsx' | 'pdf' | null>(null);
   const [issueOpen, setIssueOpen] = useState(false);
   const [editingBooking, setEditingBooking] = useState<AdminBooking | null>(null);
+  const [cancellingBooking, setCancellingBooking] = useState<AdminBooking | null>(null);
+  const [resendingBooking, setResendingBooking] = useState<AdminBooking | null>(null);
+  const [amendingBooking, setAmendingBooking] = useState<AdminBooking | null>(null);
   const [blockOpen, setBlockOpen] = useState(false);
   const [blockSeed, setBlockSeed] = useState<AdminBooking | null>(null);
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
@@ -1197,11 +1798,17 @@ export default function AdminBookings() {
                     const category = (booking.guest_category || 'visitor') as GuestCategory;
                     const roster = [...(booking.attendees ?? [])].sort((a, b) => a.position - b.position);
                     const blocked = isBlocked(booking);
+                    const closed = booking.status === 'cancelled' || booking.status === 'refunded';
+                    const canCancel = !closed && !booking.check_in_at;
+                    const canRecordRefund =
+                      booking.status === 'cancelled' && Number(booking.amount) > 0 && !booking.check_in_at;
                     const canExpand =
                       roster.length > 1 ||
                       Boolean(booking.admin_note) ||
                       Number(booking.discount_amount) > 0 ||
-                      Boolean(booking.coupon_code);
+                      Boolean(booking.coupon_code) ||
+                      Boolean(booking.cancelled_at) ||
+                      booking.refund_amount != null;
                     const open = expanded.has(booking.id);
                     return (
                       <Fragment key={booking.id}>
@@ -1288,6 +1895,46 @@ export default function AdminBookings() {
                               <Button tone="ghost" size="sm" onClick={() => setEditingBooking(booking)}>
                                 <Pencil size={12} /> Edit
                               </Button>
+                              {booking.status === 'paid' && (
+                                <Button
+                                  tone="ghost"
+                                  size="sm"
+                                  title="Resend the existing QR and PDF pass"
+                                  onClick={() => setResendingBooking(booking)}
+                                >
+                                  <Send size={12} /> Resend
+                                </Button>
+                              )}
+                              {booking.status === 'paid' && !booking.check_in_at && (
+                                <Button
+                                  tone="ghost"
+                                  size="sm"
+                                  title="Change the city, date, ticket or seat count and reissue the QR"
+                                  onClick={() => setAmendingBooking(booking)}
+                                >
+                                  <ArrowRightLeft size={12} /> Change
+                                </Button>
+                              )}
+                              {canCancel && (
+                                <Button
+                                  tone="ghost"
+                                  size="sm"
+                                  title="Cancel this booking and record a refund if one is due"
+                                  onClick={() => setCancellingBooking(booking)}
+                                >
+                                  <XCircle size={12} /> Cancel
+                                </Button>
+                              )}
+                              {canRecordRefund && (
+                                <Button
+                                  tone="ghost"
+                                  size="sm"
+                                  title="Record the refund for this cancelled booking"
+                                  onClick={() => setCancellingBooking(booking)}
+                                >
+                                  <RotateCcw size={12} /> Refund
+                                </Button>
+                              )}
                               <Button
                                 tone="danger"
                                 size="sm"
@@ -1372,6 +2019,29 @@ export default function AdminBookings() {
                                         </span>
                                         <br />
                                         {booking.admin_note}
+                                      </p>
+                                    )}
+                                    {booking.cancelled_at && (
+                                      <p className="mt-1.5 border-t border-line pt-1.5">
+                                        <span className="font-ui text-[0.6rem] uppercase tracking-[0.1em] text-muted">
+                                          Cancelled
+                                        </span>
+                                        <br />
+                                        {formatDateTime(booking.cancelled_at)}
+                                        {booking.cancelled_by_name ? ` · ${booking.cancelled_by_name}` : ''}
+                                        {booking.cancel_reason ? ` · ${booking.cancel_reason}` : ''}
+                                      </p>
+                                    )}
+                                    {booking.refund_amount != null && (
+                                      <p className="mt-1.5 border-t border-line pt-1.5">
+                                        <span className="font-ui text-[0.6rem] uppercase tracking-[0.1em] text-muted">
+                                          Refund
+                                        </span>
+                                        <br />
+                                        {formatRupees(Number(booking.refund_amount))}
+                                        {booking.refund_reference ? ` · ${booking.refund_reference}` : ''}
+                                        {booking.refunded_at ? ` · ${formatDateTime(booking.refunded_at)}` : ''}
+                                        {booking.refunded_by_name ? ` · by ${booking.refunded_by_name}` : ''}
                                       </p>
                                     )}
                                   </div>
@@ -1509,6 +2179,36 @@ export default function AdminBookings() {
           setNotice('Booking updated.');
           void load();
           void loadBlocks(false);
+        }}
+      />
+
+      <CancelRefundDialog
+        booking={cancellingBooking}
+        onClose={() => setCancellingBooking(null)}
+        onSaved={(message) => {
+          setCancellingBooking(null);
+          setNotice(message);
+          void load();
+        }}
+      />
+
+      <ResendPassDialog
+        booking={resendingBooking}
+        onClose={() => setResendingBooking(null)}
+        onSaved={(message) => {
+          setResendingBooking(null);
+          setNotice(message);
+          void load();
+        }}
+      />
+
+      <AmendBookingDialog
+        booking={amendingBooking}
+        onClose={() => setAmendingBooking(null)}
+        onSaved={(message) => {
+          setAmendingBooking(null);
+          setNotice(message);
+          void load();
         }}
       />
 

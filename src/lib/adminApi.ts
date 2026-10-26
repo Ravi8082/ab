@@ -1,4 +1,5 @@
 import type { Localized } from '@/lib/eventFormat';
+import type { Brand, BrandField } from '@/lib/brand';
 
 export type { Localized };
 
@@ -34,6 +35,8 @@ export interface AdminOverview {
     event_en: string;
     event_hi: string;
     kind: string;
+    kind_label: string;
+    kind_label_hi: string;
     capacity: number;
     sold: number;
     left: number;
@@ -43,6 +46,8 @@ export interface AdminOverview {
     name_en: string;
     name_hi: string;
     kind: string;
+    kind_label: string;
+    kind_label_hi: string;
     bookings: number | string;
     seats: number | string;
     revenue: number | string;
@@ -101,10 +106,15 @@ export interface TicketPriceSlabInput {
   label_hi?: string;
 }
 
+export type EventKindLayout = 'route' | 'single';
+
 export interface EventRow {
   id: number;
   slug: string;
-  kind: 'yatra' | 'expo';
+  kind: string;
+  kind_label: string;
+  kind_label_hi: string;
+  kind_layout: EventKindLayout;
   name_en: string;
   name_hi: string;
   tagline_en: string;
@@ -119,6 +129,24 @@ export interface EventRow {
   active: number;
   sort_order: number;
   tickets: EventTicketRow[];
+}
+
+export interface AdminEventKind {
+  slug: string;
+  label_en: string;
+  label_hi: string;
+  layout: EventKindLayout;
+  sort_order: number;
+  active: number;
+  event_count: number;
+}
+
+export interface EventKindInput {
+  label_en: string;
+  label_hi: string;
+  layout: EventKindLayout;
+  sort_order?: number;
+  active?: number;
 }
 
 export interface AdminVenue {
@@ -215,6 +243,13 @@ export interface AdminBooking {
   pass_sent_at: string | null;
   check_in_at: string | null;
   created_at: string;
+  cancelled_at: string | null;
+  cancel_reason: string | null;
+  cancelled_by_name: string | null;
+  refund_amount: number | null;
+  refund_reference: string | null;
+  refunded_at: string | null;
+  refunded_by_name: string | null;
   attendee_names: string | null;
   attendees?: { position: number; name: string; phone: string; email: string | null }[];
   event_en: string;
@@ -262,6 +297,87 @@ export const adminUpdateBooking = (
     attendees?: { name: string; phone: string; email?: string }[];
   },
 ) => request<{ pass: unknown }>(`/bookings/${id}`, { method: 'PATCH', body: JSON.stringify(input) });
+
+export interface AmendOptionTicket {
+  ticketTypeId: number;
+  name_en: string;
+  name_hi: string;
+  price: number;
+  listPrice: number;
+  left: number;
+  validDays: number;
+  passDays: number;
+}
+
+export interface AmendOptionSchedule {
+  scheduleId: number;
+  eventDate: string;
+  endDate: string | null;
+  startTime: string | null;
+  endTime: string | null;
+  state_en: string;
+  city_en: string;
+  venue_en: string;
+  tickets: AmendOptionTicket[];
+}
+
+export interface AmendOptions {
+  booking: {
+    id: number;
+    reference: string;
+    scheduleId: number;
+    ticketTypeId: number;
+    qty: number;
+    amount: number;
+    grossAmount: number;
+    discountAmount: number;
+    attendees: { position: number; name: string; phone: string; email: string | null }[];
+  };
+  schedules: AmendOptionSchedule[];
+}
+
+export const adminAmendOptions = (id: number) =>
+  request<AmendOptions>(`/bookings/${id}/amend-options`);
+
+export const adminAmendBooking = (
+  id: number,
+  input: {
+    scheduleId: number;
+    ticketTypeId: number;
+    qty: number;
+    reason: string;
+    paymentReference?: string;
+    attendees: { name: string; phone: string; email?: string }[];
+  },
+) =>
+  request<{ pass: unknown; amount: number; difference: number; extraPaid: number; refundDue: number }>(
+    `/bookings/${id}/amend`,
+    { method: 'POST', body: JSON.stringify(input) },
+  );
+
+export const adminResendPass = (id: number, email?: string) =>
+  request<{ delivered: boolean; to: string; emailConfigured: boolean }>(`/bookings/${id}/resend`, {
+    method: 'POST',
+    body: JSON.stringify(email ? { email } : {}),
+  });
+
+export const adminCancelBooking = (
+  id: number,
+  input: { reason: string; refundAmount?: number; refundReference?: string },
+) =>
+  request<{ pass: unknown; cancelled: boolean; refunded: boolean }>(`/bookings/${id}/cancel`, {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
+
+export const adminRefundBooking = (
+  id: number,
+  input: { refundAmount: number; refundReference?: string },
+) =>
+  request<{ pass: unknown; refunded: boolean }>(`/bookings/${id}/refund`, {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
 
 export interface EntryBlock {
   id: number;
@@ -499,6 +615,7 @@ export const adminDeleteStaff = (id: number) =>
 
 export interface CheckInResult {
   allowed: boolean;
+  offline?: boolean;
   reference: string;
   name: string;
   email: string;
@@ -511,9 +628,12 @@ export interface CheckInResult {
   guestCategory?: 'visitor' | 'vip' | 'press' | 'organiser' | 'staff' | 'other';
   guestLabel?: string;
   passDays?: number;
+  liveCode?: boolean;
   validFrom?: string;
   validTo?: string;
-  attendees?: { position: number; name: string; phone: string }[];
+  attendees?: { position: number; name: string; phone: string; enteredToday?: boolean }[];
+  admittedPositions?: number[];
+  admittedCount?: number;
   status: string;
   checkedInAt: string;
   gate?: string | null;
@@ -521,6 +641,13 @@ export interface CheckInResult {
     entryDate: string;
     dayNumber: number;
     calendarDays: number;
+    seats: number;
+    entriesToday: number;
+    entriesTodayAllowed: number;
+    entriesTodayLeft: number;
+    daysUsed: number;
+    daysAllowed: number;
+    daysLeft: number;
     entriesUsed: number;
     entriesAllowed: number;
     entriesLeft: number;
@@ -593,7 +720,7 @@ function queryString(filters: BookingFilters = {}, extra: Record<string, string>
 }
 
 export const adminLogin = (email: string, password: string) =>
-  request<{ admin: AdminUser; token: string }>('/login', {
+  request<{ admin: AdminUser }>('/login', {
     method: 'POST',
     body: JSON.stringify({ email, password }),
   });
@@ -638,8 +765,58 @@ export const adminWaitlist = () =>
 export const adminDeleteWaitlist = (id: number) =>
   request<{ ok: boolean }>(`/waitlist/${id}`, { method: 'DELETE' });
 
+export interface WaitlistMessageInput {
+  stateId?: number | null;
+  subject: string;
+  message: string;
+}
+
+export interface WaitlistMessageResult {
+  recipients: number;
+  sent: number;
+  logged: number;
+  failed: number;
+  emailConfigured: boolean;
+}
+
+export const adminMessageWaitlist = (input: WaitlistMessageInput) =>
+  request<WaitlistMessageResult>('/waitlist/message', { method: 'POST', body: JSON.stringify(input) });
+
+export async function adminDownloadWaitlist(filters: { stateId?: number; status?: 'pending' | 'verified' } = {}) {
+  const query = new URLSearchParams();
+  if (filters.stateId) query.set('state_id', String(filters.stateId));
+  if (filters.status) query.set('status', filters.status);
+  let response: Response;
+  try {
+    response = await fetch(`/api/admin/waitlist/export.csv${query.size ? `?${query}` : ''}`, {
+      credentials: 'include',
+    });
+  } catch {
+    throw new AdminApiError('Could not reach the server for the export.');
+  }
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    throw new AdminApiError(body?.error || 'The waitlist export could not be generated.', response.status);
+  }
+  const blob = await response.blob();
+  const disposition = response.headers.get('Content-Disposition') || '';
+  const match = disposition.match(/filename="([^"]+)"/);
+  const stamp = new Date().toISOString().slice(0, 10);
+  const filename = match?.[1] || `adhyatmik-waitlist-${stamp}.csv`;
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+}
+
 /* Events & tickets */
-export const adminEvents = () => request<{ events: EventRow[] }>('/events');export interface EventInput {
+export const adminEvents = () => request<{ events: EventRow[] }>('/events');
+
+export interface EventInput {
   name_en: string;
   name_hi: string;
   tagline_en: string;
@@ -656,6 +833,26 @@ export const adminEvents = () => request<{ events: EventRow[] }>('/events');expo
 
 export const adminUpdateEvent = (id: number, input: EventInput) =>
   request<{ ok: boolean }>(`/events/${id}`, { method: 'PUT', body: JSON.stringify(input) });
+
+export interface NewEventInput extends EventInput {
+  kind: string;
+  /** Optional — generated from the English name when left blank. */
+  slug?: string;
+}
+
+export const adminCreateEvent = (input: NewEventInput) =>
+  request<{ id: number; slug: string }>('/events', { method: 'POST', body: JSON.stringify(input) });
+
+export const adminEventKinds = () => request<{ kinds: AdminEventKind[] }>('/event-kinds');
+
+export const adminCreateEventKind = (input: EventKindInput) =>
+  request<{ slug: string }>('/event-kinds', { method: 'POST', body: JSON.stringify(input) });
+
+export const adminUpdateEventKind = (slug: string, input: EventKindInput) =>
+  request<{ ok: boolean }>(`/event-kinds/${slug}`, { method: 'PUT', body: JSON.stringify(input) });
+
+export const adminDeleteEventKind = (slug: string) =>
+  request<{ ok: boolean }>(`/event-kinds/${slug}`, { method: 'DELETE' });
 
 export interface TicketInput {
   event_id: number;
@@ -812,8 +1009,11 @@ export async function adminDownloadBookings(format: 'xlsx' | 'pdf', filters: Boo
   URL.revokeObjectURL(url);
 }
 
-export const adminCheckIn = (code: string, gate?: string) =>
-  request<CheckInResult>('/check-in', { method: 'POST', body: JSON.stringify(gate ? { code, gate } : { code }) });
+export const adminCheckIn = (code: string, gate?: string, positions?: number[]) =>
+  request<CheckInResult>('/check-in', {
+    method: 'POST',
+    body: JSON.stringify(positions?.length ? { code, gate, positions } : gate ? { code, gate } : { code }),
+  });
 
 export interface ScanAlert {
   booking_id: number;
@@ -846,6 +1046,21 @@ export const adminSaveGateSettings = (liveQrOnly: boolean) =>
   });
 
 export const adminPayments = () => request<{ payments: AdminPayment[] }>('/payments');
+
+export const adminBrand = () => request<{ brand: Brand }>('/settings/brand');
+
+export const adminSaveBrand = (input: {
+  name_en: string;
+  name_hi: string;
+  tagline_en: string;
+  tagline_hi: string;
+}) => request<{ brand: Brand }>('/settings/brand', { method: 'PUT', body: JSON.stringify(input) });
+
+export const adminUploadBrandImage = (field: BrandField, file: { name: string; mime: string; data: string }) =>
+  request<{ brand: Brand }>('/settings/brand/image', { method: 'POST', body: JSON.stringify({ field, file }) });
+
+export const adminRemoveBrandImage = (field: BrandField) =>
+  request<{ brand: Brand }>(`/settings/brand/image/${field}`, { method: 'DELETE' });
 
 /* Sales switch & reminders */
 export interface SalesSettings {
@@ -912,7 +1127,7 @@ export const adminRetryReminder = (id: number) =>
 /* Email & OTP log */
 export interface AdminEmailLog {
   id: number;
-  kind: 'otp' | 'pass' | 'reminder' | 'test';
+  kind: 'otp' | 'pass' | 'reminder' | 'test' | 'notice';
   recipient: string;
   subject: string;
   booking_id: number | null;
@@ -947,6 +1162,50 @@ export interface AdminEmailsResponse {
 
 export const adminEmails = () => request<AdminEmailsResponse>('/emails');
 
+/* Audit log */
+export interface AdminAuditEntry {
+  id: number;
+  actor_type: 'admin' | 'system' | 'public';
+  actor_id: number | null;
+  actor_name: string | null;
+  actor_email: string | null;
+  action: string;
+  entity: string | null;
+  entity_id: string | null;
+  meta: unknown;
+  ip: string | null;
+  created_at: string;
+}
+
+export interface AuditFilters {
+  page?: number;
+  pageSize?: number;
+  action?: string;
+  actorType?: '' | 'admin' | 'system' | 'public';
+  entity?: string;
+  q?: string;
+  from?: string;
+  to?: string;
+}
+
+export interface AdminAuditResponse {
+  entries: AdminAuditEntry[];
+  total: number;
+  page: number;
+  pageSize: number;
+  actions: string[];
+  entities: string[];
+}
+
+export const adminAudit = (filters: AuditFilters = {}) => {
+  const query = new URLSearchParams();
+  Object.entries(filters).forEach(([key, value]) => {
+    if (value === undefined || value === null || value === '') return;
+    query.set(key, String(value));
+  });
+  return request<AdminAuditResponse>(`/audit?${query.toString()}`);
+};
+
 /* Staff */
 export const adminStaffList = () => request<{ staff: AdminStaff[] }>('/staff');
 
@@ -958,6 +1217,12 @@ export const adminUpdateStaff = (id: number, input: { name?: string; active?: nu
 
 export const adminResetStaffPassword = (id: number, password: string) =>
   request<{ ok: boolean }>(`/staff/${id}/password`, { method: 'POST', body: JSON.stringify({ password }) });
+
+export const adminChangeMyPassword = (currentPassword: string, newPassword: string) =>
+  request<{ ok: boolean }>('/me/password', {
+    method: 'POST',
+    body: JSON.stringify({ currentPassword, newPassword }),
+  });
 
 export const adminDisableStaff = (id: number) =>
   request<{ ok: boolean }>(`/staff/${id}`, { method: 'DELETE' });
@@ -995,6 +1260,7 @@ export interface StaffStats {
     gate?: string | null;
     day_number: number;
     calendar_days: number;
+    pass_days: number;
     entries_allowed: number;
     entry_number: number;
     event_en: string;
@@ -1008,5 +1274,104 @@ export const staffMe = () => staffRequest<{ staff: AdminUser }>('/me');
 
 export const staffStats = () => staffRequest<StaffStats>('/stats');
 
-export const staffScan = (code: string, gate?: string) =>
-  staffRequest<CheckInResult>('/scan', { method: 'POST', body: JSON.stringify(gate ? { code, gate } : { code }) });
+export const staffScan = (code: string, gate?: string, positions?: number[]) =>
+  staffRequest<CheckInResult>('/scan', {
+    method: 'POST',
+    body: JSON.stringify(positions?.length ? { code, gate, positions } : gate ? { code, gate } : { code }),
+  });
+
+export interface OfflinePackBooking {
+  id: number;
+  reference: string;
+  qrToken: string | null;
+  name: string;
+  email: string;
+  phone: string;
+  qty: number;
+  passDays: number;
+  amount: number;
+  status: string;
+  source: string;
+  guestCategory: string;
+  event: { id: number; name_en: string; name_hi: string; kind: string };
+  ticket: { name_en: string; name_hi: string };
+  schedule: {
+    event_date: string;
+    end_date: string | null;
+    start_time: string | null;
+    end_time: string | null;
+  };
+  location: {
+    state_en: string;
+    state_hi: string;
+    city_en: string;
+    city_hi: string;
+    venue_en: string;
+    venue_hi: string;
+    address_en: string;
+    address_hi: string;
+  };
+  attendees: { position: number; name: string; phone: string }[];
+  entries: {
+    used: number;
+    daysUsed: number;
+    today: number;
+    lastEntryDate: string | null;
+    lastEntryAt: string | null;
+    lastGate: string | null;
+    lastStaff: string | null;
+  };
+}
+
+export interface OfflinePackBlock {
+  bookingId: number | null;
+  email: string | null;
+  phone: string | null;
+  scope: 'all_events' | 'event' | string;
+  eventId: number | null;
+  reason: string;
+  blockedBy: string | null;
+}
+
+export interface OfflinePack {
+  generatedAt: string;
+  serverDate: string;
+  staff: { id: number; name: string };
+  liveQrOnly: boolean;
+  bookings: OfflinePackBooking[];
+  blocks: OfflinePackBlock[];
+}
+
+export interface OfflineScanInput {
+  clientId: string;
+  code: string;
+  gate?: string | null;
+  entryDate: string;
+  scannedAt: string;
+}
+
+export interface OfflineSyncItem {
+  clientId: string;
+  status: 'synced' | 'rejected' | 'retry';
+  duplicate?: boolean;
+  reference?: string | null;
+  name?: string;
+  entryDate?: string;
+  message?: string;
+  details?: unknown;
+}
+
+export interface OfflineSyncResult {
+  synced: number;
+  rejected: number;
+  retry: number;
+  results: OfflineSyncItem[];
+}
+
+export const staffOfflinePack = () => staffRequest<OfflinePack>('/offline-pack');
+
+export const staffSyncOffline = (scans: OfflineScanInput[]) =>
+  staffRequest<OfflineSyncResult>('/sync-offline', {
+    method: 'POST',
+    body: JSON.stringify({ scans }),
+  });
