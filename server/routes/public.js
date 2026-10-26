@@ -14,9 +14,10 @@ import {
   publicPass,
   soldBySchedule,
 } from '../lib/eventBookings.js';
-import { getSalesSettings, isSalesClosed, publicSalesState } from '../lib/settings.js';
+import { getGateSettings, getSalesSettings, isSalesClosed, publicSalesState } from '../lib/settings.js';
 import { effectiveUnitPrice, priceOnDate, priceSlabsByTicket } from '../lib/ticketPricing.js';
 import { joinWaitlist, resendWaitlistCode, verifyWaitlistCode } from '../lib/waitlist.js';
+import { issuePassCode } from '../lib/passCodes.js';
 import { cachedEventPage } from '../lib/pageCache.js';
 import { normalizeCode, previewCoupon, recordCouponUse, redeemCoupon } from '../lib/offers.js';
 import { replaceAttendees } from '../lib/attendees.js';
@@ -45,6 +46,15 @@ const otpLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many code requests. Please wait.' },
+});
+
+// The pass screen refreshes its live QR once a minute; a little headroom for retries is enough.
+const passCodeLimiter = rateLimit({
+  windowMs: 5 * 60 * 1000,
+  limit: 40,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many live QR requests. Please wait a minute.' },
 });
 
 const paymentLimiter = rateLimit({
@@ -765,6 +775,27 @@ publicRouter.get(
     }
 
     res.json(publicPass(row));
+  }),
+);
+
+publicRouter.get(
+  '/events/gate-settings',
+  asyncHandler(async (_req, res) => {
+    const settings = await getGateSettings();
+    res.json({ liveQrOnly: settings.live_qr_only });
+  }),
+);
+
+publicRouter.post(
+  '/events/pass-code',
+  passCodeLimiter,
+  asyncHandler(async (req, res) => {
+    const issued = await issuePassCode({
+      reference: req.body?.reference,
+      contact: req.body?.contact,
+      ip: clientIp(req),
+    });
+    res.json(issued);
   }),
 );
 

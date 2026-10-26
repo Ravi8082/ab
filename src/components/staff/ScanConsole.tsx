@@ -32,7 +32,17 @@ type BlockedInfo = {
   blockedBy: string | null;
 };
 
-type DenialCode = 'not_paid' | 'not_started' | 'expired' | 'entries_exhausted' | 'already_scanned' | 'unknown';
+type DenialCode =
+  | 'not_paid'
+  | 'not_started'
+  | 'expired'
+  | 'entries_exhausted'
+  | 'already_scanned'
+  | 'live_code_invalid'
+  | 'live_code_used'
+  | 'live_code_expired'
+  | 'static_disabled'
+  | 'unknown';
 
 type DenialInfo = {
   reference: string;
@@ -50,6 +60,9 @@ type DenialInfo = {
   entriesLeft?: number;
   lastEntryDate?: string;
   lastEntryAt?: string;
+  lastGate?: string | null;
+  lastStaff?: string | null;
+  otherGate?: boolean;
   ticketName?: string;
   eventName?: string;
   endTime?: string;
@@ -88,6 +101,26 @@ const DENIED_COPY: Record<DenialCode, { en: string; hi: string; note: string }> 
     en: 'Payment pending',
     hi: 'भुगतान बाकी है',
     note: 'This booking is not paid, or it was cancelled or refunded. Entry is not allowed.',
+  },
+  live_code_invalid: {
+    en: 'Live QR not recognised',
+    hi: 'लाइव QR मान्य नहीं',
+    note: 'Ask the devotee to refresh the pass screen and show the code that appears now.',
+  },
+  live_code_used: {
+    en: 'Live QR already used',
+    hi: 'लाइव QR पहले उपयोग हो चुका',
+    note: 'A live code works once and lasts 60 seconds. A screenshot cannot be reused — ask for the code on screen right now.',
+  },
+  live_code_expired: {
+    en: 'Live QR expired',
+    hi: 'लाइव QR की समय-सीमा खत्म',
+    note: 'Each live code lasts 60 seconds. Ask the devotee to refresh the pass screen for a new code.',
+  },
+  static_disabled: {
+    en: 'Use the live QR',
+    hi: 'लाइव QR दिखाएँ',
+    note: 'Printed and static QR passes are switched off. Ask the devotee to open the pass and show the rotating QR.',
   },
   unknown: {
     en: 'Not allowed',
@@ -203,6 +236,7 @@ function SuccessBody({ result }: { result: CheckInResult }) {
           <p className="mt-1.5 flex flex-wrap items-center gap-1.5">
             <GuestChip category={result.guestCategory} />
             {length && <LightChip>{length}</LightChip>}
+            {result.gate && <LightChip>{result.gate}</LightChip>}
             {result.source === 'admin_free' && <LightChip>Free issue · निःशुल्क</LightChip>}
           </p>
         </div>
@@ -376,6 +410,17 @@ function DeniedBody({ feedback }: { feedback: Extract<Feedback, { kind: 'denied'
           <p className="mt-1.5 text-[0.7rem] text-red-800/75">{copy.note}</p>
         </div>
 
+        {denied.otherGate && (
+          <p className="rounded-xl bg-red-600 px-3 py-2 text-[0.72rem] font-semibold leading-relaxed text-white">
+            Do not allow entry · इस क्यूआर से प्रवेश मत दो
+            <span className="mt-0.5 block font-normal text-red-50/90">
+              This QR already opened a gate other than yours
+              {denied.lastGate ? ` (${denied.lastGate})` : ''} — someone may have forwarded the same pass.
+              Send this devotee to the help desk.
+            </span>
+          </p>
+        )}
+
         <dl className="grid gap-3 sm:grid-cols-2">
           <Fact
             tone="bad"
@@ -397,11 +442,18 @@ function DeniedBody({ feedback }: { feedback: Extract<Feedback, { kind: 'denied'
             label="Last scanned"
             value={lastScan}
             sub={
-              denied.entriesAllowed
-                ? `${denied.entriesUsed ?? 0} of ${denied.entriesAllowed} ${
-                    denied.entriesAllowed === 1 ? 'entry' : 'entries'
-                  } used · ${denied.entriesLeft ?? 0} open`
-                : undefined
+              [
+                denied.entriesAllowed
+                  ? `${denied.entriesUsed ?? 0} of ${denied.entriesAllowed} ${
+                      denied.entriesAllowed === 1 ? 'entry' : 'entries'
+                    } used · ${denied.entriesLeft ?? 0} open`
+                  : null,
+                denied.lastGate
+                  ? `Gate ${denied.lastGate}${denied.lastStaff ? ` · ${denied.lastStaff}` : ''}`
+                  : null,
+              ]
+                .filter(Boolean)
+                .join(' · ') || undefined
             }
           />
           <Fact
@@ -445,11 +497,18 @@ export default function ScanConsole({
   onCheckedIn,
   title = 'Scan a pass',
 }: {
-  scan: (code: string) => Promise<CheckInResult>;
+  scan: (code: string, gate?: string) => Promise<CheckInResult>;
   onCheckedIn?: () => void;
   title?: string;
 }) {
   const [manual, setManual] = useState('');
+  const [gate, setGate] = useState(() => {
+    try {
+      return localStorage.getItem('ab-gate') || '';
+    } catch {
+      return '';
+    }
+  });
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
   const [camera, setCamera] = useState<'idle' | 'starting' | 'running' | 'error'>('idle');
@@ -460,6 +519,8 @@ export default function ScanConsole({
   const busyRef = useRef(false);
   const scanRef = useRef(scan);
   scanRef.current = scan;
+  const gateRef = useRef(gate);
+  gateRef.current = gate;
   const onCheckedInRef = useRef(onCheckedIn);
   onCheckedInRef.current = onCheckedIn;
   const lastScanRef = useRef<{ code: string; at: number }>({ code: '', at: 0 });
@@ -542,7 +603,7 @@ export default function ScanConsole({
     setBusy(true);
     setStoppedAfterScan(Boolean(scannerRef.current));
     try {
-      const result = await scanRef.current(code);
+      const result = await scanRef.current(code, gateRef.current.trim() || undefined);
       setFeedback({ kind: 'success', result });
       setManual('');
       onCheckedInRef.current?.();
@@ -574,7 +635,17 @@ export default function ScanConsole({
             },
           });
         } else if (details?.denied) {
-          const known: DenialCode[] = ['not_paid', 'not_started', 'expired', 'entries_exhausted', 'already_scanned'];
+          const known: DenialCode[] = [
+            'not_paid',
+            'not_started',
+            'expired',
+            'entries_exhausted',
+            'already_scanned',
+            'live_code_invalid',
+            'live_code_used',
+            'live_code_expired',
+            'static_disabled',
+          ];
           const rawCode = String(details.code ?? details.reason ?? '');
           setFeedback({
             kind: 'denied',
@@ -595,6 +666,9 @@ export default function ScanConsole({
               entriesLeft: details.entriesLeft,
               lastEntryDate: details.lastEntryDate,
               lastEntryAt: details.lastEntryAt,
+              lastGate: details.lastGate ?? null,
+              lastStaff: details.lastStaff ?? null,
+              otherGate: Boolean(details.otherGate),
               ticketName: details.ticketName ?? details.ticket?.name_en,
               eventName: details.eventName ?? details.event?.name_en,
               endTime: details.endTime ?? details.schedule?.end_time,
@@ -693,6 +767,33 @@ export default function ScanConsole({
       </div>
 
       <div className="space-y-4 p-4 sm:p-5">
+        <div className="flex flex-col gap-2 rounded-xl border border-line bg-line/10 px-3 py-2.5 sm:flex-row sm:items-center">
+          <span className="flex items-center gap-1.5 font-ui text-[0.62rem] uppercase tracking-[0.14em] text-muted">
+            <MapPin size={13} className="text-saffron" /> Your gate
+          </span>
+          <input
+            value={gate}
+            onChange={(event) => {
+              const next = event.target.value.slice(0, 60);
+              setGate(next);
+              try {
+                localStorage.setItem('ab-gate', next);
+              } catch {
+                // Private mode — the label simply won't be remembered next time.
+              }
+            }}
+            placeholder="e.g. Gate 2 — East entrance"
+            maxLength={60}
+            autoComplete="off"
+            spellCheck={false}
+            aria-label="Your gate name"
+            className="field !py-2 text-sm sm:flex-1"
+          />
+          <p className="text-[0.65rem] leading-snug text-muted sm:max-w-[220px]">
+            Saved per device. A QR scanned twice at another gate shows up here.
+          </p>
+        </div>
+
         <div className="relative overflow-hidden rounded-2xl bg-sindoor-deep">
           <div id={readerIdRef.current} className="qr-reader min-h-[260px] w-full sm:min-h-[320px]" />
 

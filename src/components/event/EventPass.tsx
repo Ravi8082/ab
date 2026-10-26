@@ -5,16 +5,18 @@ import {
   CheckCircle2,
   Clock3,
   Download,
+  Loader2,
   Mail,
   MapPin,
   Navigation,
   QrCode,
+  RefreshCw,
   ShieldCheck,
   Ticket,
   Users,
 } from 'lucide-react';
 import type { Lang } from '@/types';
-import type { EventBookingPass } from '@/lib/eventApi';
+import { fetchGateSettings, issueLivePassCode, type EventBookingPass } from '@/lib/eventApi';
 import { formatDateRange, formatTimeRange, bi } from '@/lib/eventFormat';
 import { formatRupees } from '@/lib/pricing';
 
@@ -42,6 +44,12 @@ export default function EventPass({
   compact?: boolean;
 }) {
   const [qr, setQr] = useState('');
+  const [liveQr, setLiveQr] = useState('');
+  const [liveCode, setLiveCode] = useState('');
+  const [liveExpiresAt, setLiveExpiresAt] = useState(0);
+  const [liveError, setLiveError] = useState('');
+  const [liveQrOnly, setLiveQrOnly] = useState(false);
+  const [secondsLeft, setSecondsLeft] = useState(0);
 
   const dateLabel =
     pass.schedule?.event_date
@@ -79,6 +87,59 @@ export default function EventPass({
 
   const paid = pass.status === 'paid';
   const totalDays = Math.max(1, pass.passDays ?? 1);
+
+  useEffect(() => {
+    let active = true;
+    fetchGateSettings()
+      .then((state) => {
+        if (active) setLiveQrOnly(Boolean(state.liveQrOnly));
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!paid) return;
+    let active = true;
+    let timer: number | undefined;
+    const issue = async () => {
+      try {
+        const issued = await issueLivePassCode(pass.reference, pass.email);
+        const url = await QRCode.toDataURL(issued.code, {
+          width: 360,
+          margin: 1,
+          errorCorrectionLevel: 'M',
+          color: { dark: '#0F2342', light: '#FFFDF1' },
+        });
+        if (!active) return;
+        setLiveQr(url);
+        setLiveCode(issued.code);
+        setLiveExpiresAt(Date.parse(issued.expiresAt) || Date.now() + issued.ttlSeconds * 1000);
+        setLiveError('');
+        timer = window.setTimeout(issue, Math.max(10, issued.ttlSeconds - 12) * 1000);
+      } catch (err) {
+        if (!active) return;
+        setLiveError(err instanceof Error ? err.message : 'Could not load the live QR.');
+        timer = window.setTimeout(issue, 15000);
+      }
+    };
+    void issue();
+    return () => {
+      active = false;
+      if (timer) window.clearTimeout(timer);
+    };
+  }, [paid, pass.reference, pass.email]);
+
+  useEffect(() => {
+    if (!liveExpiresAt) return;
+    const tick = () => setSecondsLeft(Math.max(0, Math.round((liveExpiresAt - Date.now()) / 1000)));
+    tick();
+    const id = window.setInterval(tick, 1000);
+    return () => window.clearInterval(id);
+  }, [liveExpiresAt]);
+
   const calendarDays = Math.max(1, pass.calendarDays ?? totalDays);
   const multiDay = totalDays > 1;
   const daysUsed = pass.checkInCount;
@@ -135,7 +196,59 @@ export default function EventPass({
 
       <div className={`grid gap-6 ${compact ? 'p-5' : 'p-6 sm:grid-cols-[auto_1fr] sm:p-7'}`}>
         <div className="mx-auto w-full max-w-[240px]">
-          {qr ? (
+          {paid && (
+            <div
+              className={`mb-3 rounded-2xl border p-3 ${
+                liveQrOnly ? 'border-emerald-300 bg-emerald-50' : 'border-line bg-sandal-2'
+              }`}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <p className="flex items-center gap-1.5 font-ui text-[0.6rem] uppercase tracking-[0.14em] text-muted">
+                  <RefreshCw size={11} className={secondsLeft <= 10 ? 'text-red-500' : 'text-saffron'} />
+                  {L('Live gate QR', 'लाइव गेट QR')}
+                </p>
+                <span
+                  className={`font-mono text-[0.66rem] font-semibold ${
+                    secondsLeft <= 10 ? 'text-red-600' : 'text-muted'
+                  }`}
+                >
+                  {secondsLeft}s
+                </span>
+              </div>
+              {liveQr ? (
+                <img
+                  src={liveQr}
+                  alt={`Live gate QR ${pass.reference}`}
+                  className="mx-auto mt-2 w-full max-w-[190px]"
+                />
+              ) : (
+                <div className="mt-2 grid aspect-square w-full place-items-center rounded-xl border border-dashed border-line">
+                  <Loader2 size={22} className="animate-spin text-muted" />
+                </div>
+              )}
+              {liveCode && (
+                <p className="mt-1.5 break-all text-center font-mono text-[0.56rem] tracking-[0.06em] text-muted">
+                  {liveCode}
+                </p>
+              )}
+              <p className="mt-1.5 text-center text-[0.62rem] leading-snug text-muted">
+                {L(
+                  'Refreshes every minute. Show this QR at the gate — an old screenshot stops working.',
+                  'हर मिनट बदलता है। गेट पर यही QR दिखाएँ — पुराना स्क्रीनशॉट काम नहीं करेगा।',
+                )}
+              </p>
+              {liveError && <p className="mt-1 text-center text-[0.62rem] text-red-600">{liveError}</p>}
+            </div>
+          )}
+          {paid && liveQrOnly && (
+            <p className="mb-3 text-center text-[0.62rem] leading-snug text-emerald-700">
+              {L(
+                'Printed QR is switched off at the gate. Only the live QR above is accepted.',
+                'गेट पर प्रिंटेड QR बंद है। ऊपर वाला लाइव QR ही मान्य है।',
+              )}
+            </p>
+          )}
+          {(!paid || !liveQrOnly) && (qr ? (
             <div className="relative rounded-2xl border border-line bg-[#FFFDF1] p-3">
               <span className="absolute left-2 top-2 h-4 w-4 rounded-tl-lg border-l-2 border-t-2 border-saffron/40" />
               <span className="absolute right-2 top-2 h-4 w-4 rounded-tr-lg border-r-2 border-t-2 border-saffron/40" />
@@ -152,8 +265,8 @@ export default function EventPass({
                 </p>
               </div>
             </div>
-          )}
-          {qr && (
+          ))}
+          {!liveQrOnly && qr && (
             <button type="button" onClick={downloadQr} className="btn btn-ghost btn-sm btn-block mt-3">
               <Download size={14} /> {L('Download QR', 'QR डाउनलोड करें')}
             </button>

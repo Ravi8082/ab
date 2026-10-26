@@ -20,6 +20,7 @@ const scanLimiter = rateLimit({
 
 const scanSchema = z.object({
   code: z.string().trim().min(3).max(40),
+  gate: z.string().trim().max(60).optional(),
 });
 
 staffRouter.use(requireAdmin);
@@ -37,7 +38,7 @@ staffRouter.get(
       query('SELECT COUNT(*) AS n FROM event_booking_checkins WHERE entry_date = CURDATE()'),
       query('SELECT COUNT(*) AS n FROM event_booking_checkins'),
       query(
-        `SELECT ci.id, b.reference, b.name, b.qty, ci.created_at AS check_in_at, ci.entry_date,
+        `SELECT ci.id, b.reference, b.name, b.qty, ci.created_at AS check_in_at, ci.entry_date, ci.gate,
                 DATEDIFF(ci.entry_date, s.event_date) + 1 AS day_number,
                 GREATEST(1, DATEDIFF(COALESCE(s.end_date, s.event_date), s.event_date) + 1) AS calendar_days,
                 GREATEST(1, LEAST(b.pass_days, DATEDIFF(COALESCE(s.end_date, s.event_date), s.event_date) + 1)) AS entries_allowed,
@@ -76,6 +77,7 @@ staffRouter.post(
       code: parsed.data.code,
       actor: req.admin,
       ip: clientIp(req),
+      gate: parsed.data.gate,
     });
     res.json(result);
   }),

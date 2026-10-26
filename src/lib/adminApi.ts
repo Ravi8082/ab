@@ -302,6 +302,7 @@ export interface CheckInResult {
   attendees?: { position: number; name: string; phone: string }[];
   status: string;
   checkedInAt: string;
+  gate?: string | null;
   checkIn: {
     entryDate: string;
     dayNumber: number;
@@ -597,8 +598,38 @@ export async function adminDownloadBookings(format: 'xlsx' | 'pdf', filters: Boo
   URL.revokeObjectURL(url);
 }
 
-export const adminCheckIn = (code: string) =>
-  request<CheckInResult>('/check-in', { method: 'POST', body: JSON.stringify({ code }) });
+export const adminCheckIn = (code: string, gate?: string) =>
+  request<CheckInResult>('/check-in', { method: 'POST', body: JSON.stringify(gate ? { code, gate } : { code }) });
+
+export interface ScanAlert {
+  booking_id: number;
+  reference: string;
+  name: string;
+  guest_category: string;
+  reason: string;
+  attempts: number;
+  gates: string[];
+  first_at: string;
+  last_at: string;
+  entry_gate: string | null;
+  entry_staff: string | null;
+}
+
+export const adminScanAlerts = () =>
+  request<{ alerts: ScanAlert[]; thresholds: { otherGate: number; repeat: number } }>('/scan-alerts');
+
+export interface GateSettings {
+  live_qr_only: boolean;
+  updated_at?: string | null;
+}
+
+export const adminGateSettings = () => request<{ settings: GateSettings }>('/settings/gates');
+
+export const adminSaveGateSettings = (liveQrOnly: boolean) =>
+  request<{ settings: GateSettings }>('/settings/gates', {
+    method: 'PUT',
+    body: JSON.stringify({ live_qr_only: liveQrOnly }),
+  });
 
 export const adminPayments = () => request<{ payments: AdminPayment[] }>('/payments');
 
@@ -747,6 +778,7 @@ export interface StaffStats {
     qty: number;
     check_in_at: string;
     entry_date: string;
+    gate?: string | null;
     day_number: number;
     calendar_days: number;
     entries_allowed: number;
@@ -762,5 +794,5 @@ export const staffMe = () => staffRequest<{ staff: AdminUser }>('/me');
 
 export const staffStats = () => staffRequest<StaffStats>('/stats');
 
-export const staffScan = (code: string) =>
-  staffRequest<CheckInResult>('/scan', { method: 'POST', body: JSON.stringify({ code }) });
+export const staffScan = (code: string, gate?: string) =>
+  staffRequest<CheckInResult>('/scan', { method: 'POST', body: JSON.stringify(gate ? { code, gate } : { code }) });

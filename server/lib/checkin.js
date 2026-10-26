@@ -2,6 +2,8 @@ import { query, withTransaction } from '../db.js';
 import { HttpError } from './util.js';
 import { audit } from './auth.js';
 import { findActiveBlockOn } from './entryBlocks.js';
+import { getGateSettings } from './settings.js';
+import { parseLiveCode } from './passCodes.js';
 
 const DETAILS_SQL = `
   SELECT b.id, b.reference, b.name, b.email, b.phone, b.qty, b.pass_days, b.amount, b.status, b.qr_token,
@@ -115,7 +117,7 @@ function whereScanned(lastScan, sameGate) {
   const by = lastScan.staff ? ` by ${lastScan.staff}` : '';
   return sameGate
     ? `It was taken at your gate (${lastScan.gate})${by}. `
-    : `It was already taken at GATE ${lastScan.gate}${by} — this looks like a forwarded QR. `;
+    : `It was already taken at a different gate — ${lastScan.gate}${by} — this looks like a forwarded QR. `;
 }
 
 async function lastScanAt(conn, bookingId) {
@@ -192,7 +194,8 @@ function denialDetails(booking, extra) {
 export async function checkInBooking({ code, actor, ip, gate }) {
   const value = String(code || '').trim();
   const gateLabel = normalizeGate(gate);
-  if (!isToken(value) && !isReference(value)) {
+  const live = parseLiveCode(value);
+  if (!live && !isToken(value) && !isReference(value)) {
     throw new HttpError(400, 'This is not a valid pass code or reference number.');
   }
 
@@ -202,9 +205,11 @@ export async function checkInBooking({ code, actor, ip, gate }) {
   let result;
   try {
     result = await withTransaction(async (conn) => {
-    const [rows] = isToken(value)
-      ? await conn.execute(`${DETAILS_SQL} WHERE b.qr_token = ? LIMIT 1 FOR UPDATE`, [value])
-      : await conn.execute(`${DETAILS_SQL} WHERE b.reference = ? LIMIT 1 FOR UPDATE`, [value.toUpperCase()]);
+    const [rows] = live
+      ? await conn.execute(`${DETAILS_SQL} WHERE b.reference = ? LIMIT 1 FOR UPDATE`, [live.reference])
+      : isToken(value)
+        ? await conn.execute(`${DETAILS_SQL} WHERE b.qr_token = ? LIMIT 1 FOR UPDATE`, [value])
+        : await conn.execute(`${DETAILS_SQL} WHERE b.reference = ? LIMIT 1 FOR UPDATE`, [value.toUpperCase()]);
 
     const booking = rows[0];
     if (!booking) throw new HttpError(404, 'This pass was not found in our database.');
@@ -243,6 +248,54 @@ export async function checkInBooking({ code, actor, ip, gate }) {
           reason: block.reason,
           blockedBy: block.blocked_by_name || null,
         },
+      );
+    }
+
+    let liveCodeRow = null;
+    if (live) {
+      const [codes] = await conn.execute(
+        `SELECT id, used_at, used_gate, (expires_at <= NOW()) AS expired
+           FROM event_pass_codes
+          WHERE booking_id = ? AND code = ?
+          LIMIT 1 FOR UPDATE`,
+        [booking.id, live.code],
+      );
+      liveCodeRow = codes[0];
+      if (!liveCodeRow) {
+        throw new HttpError(
+          409,
+          'This live QR is not recognised. Ask the devotee to refresh the pass screen and show the new code.',
+          denialDetails(booking, { reason: 'live_code_invalid' }),
+        );
+      }
+      if (liveCodeRow.used_at) {
+        const when = String(liveCodeRow.used_at).slice(0, 16);
+        const superseded = liveCodeRow.used_gate === 'superseded';
+        const where = liveCodeRow.used_gate && !superseded ? ` at ${liveCodeRow.used_gate}` : '';
+        throw new HttpError(
+          409,
+          superseded
+            ? 'This live QR was replaced by a newer code on the devotee’s screen. Ask them to show the code that is visible now.'
+            : `This live QR was already used${where} (${when}). A live code works only once — ask for a fresh code on the pass screen.`,
+          denialDetails(booking, {
+            reason: 'live_code_used',
+            lastGate: superseded ? null : liveCodeRow.used_gate || null,
+            lastEntryAt: when,
+          }),
+        );
+      }
+      if (Number(liveCodeRow.expired)) {
+        throw new HttpError(
+          409,
+          'This live QR has expired. Ask the devotee to refresh the pass screen — a new code appears every minute.',
+          denialDetails(booking, { reason: 'live_code_expired' }),
+        );
+      }
+    } else if ((await getGateSettings()).live_qr_only) {
+      throw new HttpError(
+        409,
+        'Static QR passes are switched off. Ask the devotee to open the live pass and show the rotating QR.',
+        denialDetails(booking, { reason: 'static_disabled' }),
       );
     }
 
@@ -360,12 +413,20 @@ export async function checkInBooking({ code, actor, ip, gate }) {
       [actor.id, booking.id],
     );
 
+    if (liveCodeRow) {
+      await conn.execute(
+        'UPDATE event_pass_codes SET used_at = NOW(), used_gate = ? WHERE id = ?',
+        [gateLabel, liveCodeRow.id],
+      );
+    }
+
       const entriesUsed = daysUsed + 1;
       return {
         ...booking,
         check_in_at: 'now',
         entryDate: today,
         gate: gateLabel,
+        liveCode: Boolean(live),
         dayNumber,
         calendarDays,
         entriesAllowed,
@@ -393,7 +454,7 @@ export async function checkInBooking({ code, actor, ip, gate }) {
     meta: {
       reference: result.reference,
       qty: Number(result.qty),
-      mode: isToken(value) ? 'qr' : 'reference',
+      mode: result.liveCode ? 'live_qr' : isToken(value) ? 'qr' : 'reference',
       gate: result.gate,
       entryDate: result.entryDate,
       dayNumber: result.dayNumber,
@@ -418,6 +479,7 @@ export async function checkInBooking({ code, actor, ip, gate }) {
     guestLabel: guestLabel(result.guest_category),
     passDays: result.entriesAllowed,
     gate: result.gate,
+    liveCode: result.liveCode,
     validFrom: isoDate(result.event_date),
     validTo: isoDate(result.end_date || result.event_date),
     attendees: attendeeList(result.attendees_json),

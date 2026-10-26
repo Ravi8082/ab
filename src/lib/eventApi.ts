@@ -381,6 +381,20 @@ export const eventApi = {
     request<StaffScanResult>('/api/staff/scan', { method: 'POST', body: JSON.stringify({ code }) }),
 };
 
+export interface LivePassCode {
+  code: string;
+  ttlSeconds: number;
+  expiresAt: string;
+}
+
+export const issueLivePassCode = (reference: string, contact: string) =>
+  request<LivePassCode>('/api/events/pass-code', {
+    method: 'POST',
+    body: JSON.stringify({ reference, contact }),
+  });
+
+export const fetchGateSettings = () => request<{ liveQrOnly: boolean }>('/api/events/gate-settings');
+
 export interface StaffScanResult {
   allowed: boolean;
   reference: string;

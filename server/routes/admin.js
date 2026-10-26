@@ -22,8 +22,10 @@ import {
 } from '../lib/eventReports.js';
 import { checkInBooking } from '../lib/checkin.js';
 import {
+  getGateSettings,
   getSalesSettings,
   isSalesClosed,
+  saveGateSettings,
   saveSalesSettings,
   smtpConfigured,
 } from '../lib/settings.js';
@@ -177,6 +179,32 @@ adminRouter.put(
       ip: clientIp(req),
     });
     res.json({ settings: { ...settings, closed: isSalesClosed(settings) }, smtpConfigured: smtpConfigured() });
+  }),
+);
+
+adminRouter.get(
+  '/settings/gates',
+  asyncHandler(async (_req, res) => {
+    res.json({ settings: await getGateSettings({ fresh: true }) });
+  }),
+);
+
+adminRouter.put(
+  '/settings/gates',
+  asyncHandler(async (req, res) => {
+    const parsed = z.object({ live_qr_only: z.boolean() }).safeParse(req.body);
+    if (!parsed.success) throw new HttpError(400, 'Please check the gate settings.');
+    const settings = await saveGateSettings(parsed.data, req.admin.id);
+    await audit({
+      actorType: 'admin',
+      actorId: req.admin.id,
+      action: 'event.gate.settings',
+      entity: 'app_settings',
+      entityId: 'gates',
+      meta: { live_qr_only: settings.live_qr_only },
+      ip: clientIp(req),
+    });
+    res.json({ settings });
   }),
 );
 
@@ -1109,8 +1137,38 @@ adminRouter.post(
   '/check-in',
   asyncHandler(async (req, res) => {
     const code = String(req.body?.code || req.body?.token || '').trim();
-    const result = await checkInBooking({ code, actor: req.admin, ip: clientIp(req) });
+    const gate = req.body?.gate ? String(req.body.gate) : undefined;
+    const result = await checkInBooking({ code, actor: req.admin, ip: clientIp(req), gate });
     res.json(result);
+  }),
+);
+
+/* Duplicate-scan alerts: rejected gate attempts on today's paid passes. */
+adminRouter.get(
+  '/scan-alerts',
+  asyncHandler(async (_req, res) => {
+    const rows = await query(
+      `SELECT d.booking_id, d.reference, b.name, b.guest_category, d.reason,
+              COUNT(*) AS attempts,
+              GROUP_CONCAT(DISTINCT COALESCE(d.gate, 'Unlabelled gate') ORDER BY d.gate SEPARATOR ', ') AS gates,
+              MIN(d.created_at) AS first_at, MAX(d.created_at) AS last_at,
+              (SELECT c.gate FROM event_booking_checkins c
+                WHERE c.booking_id = d.booking_id AND c.entry_date = CURDATE()
+                ORDER BY c.created_at DESC LIMIT 1) AS entry_gate,
+              (SELECT a.name FROM event_booking_checkins c2
+                 JOIN admins a ON a.id = c2.checked_in_by
+                WHERE c2.booking_id = d.booking_id AND c2.entry_date = CURDATE()
+                ORDER BY c2.created_at DESC LIMIT 1) AS entry_staff
+       FROM event_scan_denials d
+       JOIN event_bookings b ON b.id = d.booking_id
+       WHERE d.entry_date = CURDATE()
+         AND d.reason IN ('already_scanned', 'entries_exhausted')
+       GROUP BY d.booking_id, d.reference, b.name, b.guest_category, d.reason
+       HAVING attempts >= 1
+       ORDER BY last_at DESC
+       LIMIT 40`,
+    );
+    res.json({ alerts: rows, thresholds: { otherGate: 1, repeat: 3 } });
   }),
 );
 

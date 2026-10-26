@@ -76,3 +76,50 @@ export async function saveSalesSettings(input, adminId = null) {
 export function smtpConfigured() {
   return Boolean(config.smtp.host && config.smtp.user && config.smtp.pass);
 }
+
+/* ------------------------------- Gate policy ------------------------------- */
+
+export const GATE_DEFAULTS = {
+  live_qr_only: false,
+};
+
+let gateCache = { at: 0, value: null };
+
+function normalizeGateSettings(raw) {
+  let value = raw;
+  if (typeof value === 'string') {
+    try {
+      value = JSON.parse(value);
+    } catch {
+      value = {};
+    }
+  }
+  if (!value || typeof value !== 'object') value = {};
+  return {
+    live_qr_only: value.live_qr_only === true,
+  };
+}
+
+export async function getGateSettings({ fresh = false } = {}) {
+  if (!fresh && gateCache.value && Date.now() - gateCache.at < CACHE_MS) return gateCache.value;
+  const [row] = await query(
+    'SELECT value_json, updated_at FROM app_settings WHERE setting_key = ? LIMIT 1',
+    ['gates'],
+  );
+  const value = { ...normalizeGateSettings(row?.value_json), updated_at: row?.updated_at ?? null };
+  gateCache = { at: Date.now(), value };
+  return value;
+}
+
+export async function saveGateSettings(input, adminId = null) {
+  const current = await getGateSettings({ fresh: true });
+  const next = normalizeGateSettings({ ...current, ...input });
+  await query(
+    `INSERT INTO app_settings (setting_key, value_json, updated_by)
+     VALUES ('gates', ?, ?)
+     ON DUPLICATE KEY UPDATE value_json = ?, updated_by = ?`,
+    [JSON.stringify(next), adminId, JSON.stringify(next), adminId],
+  );
+  gateCache = { at: 0, value: null };
+  return getGateSettings({ fresh: true });
+}

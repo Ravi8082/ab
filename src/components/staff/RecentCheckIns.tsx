@@ -44,6 +44,7 @@ export default function RecentCheckIns({
               </div>
               <p className="mt-1 truncate text-[0.7rem] text-muted">
                 {entry.event_en} · {entry.city_en}
+                {entry.gate ? ` · ${entry.gate}` : ''}
               </p>
               <p className="text-[0.66rem] text-muted/80">
                 {formatDateTime(entry.check_in_at)}
