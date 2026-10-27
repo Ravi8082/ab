@@ -99,7 +99,9 @@ See [.env.example](.env.example) for the full annotated list. Groups:
 
 - Landing page with 3D diya, city ring, expo yajna visuals, bilingual EN/हिंदी toggle
 - Ticket cards with date slabs, offer/actual pricing and coupon box
-- Booking drawer: lead devotee + per-person details for group passes, T&C consent
+- Booking drawer: lead devotee + per-person details for group passes, policy text shown on the
+  page and a required consent tick — each booking stores `terms_accepted_at`, `terms_version`
+  (SHA-256 of the terms/privacy/refund rows in force) and `terms_ip`, visible in Bookings → Details
 - Razorpay checkout (or simulated payment in dev), confirmation page with PDF pass
 - Booking lookup / amendment requests and waitlist flow for states without an event
 - Legal pages (terms, privacy, refund), cookie consent, robots.txt / sitemap.xml
@@ -109,9 +111,10 @@ See [.env.example](.env.example) for the full annotated list. Groups:
 Sections: Dashboard, Events, Schedules, Locations, Coupons, Bookings, Sales,
 Emails, Audit log, Staff, Check-in, Content, Account.
 
-- **Bookings** — search/filter, CSV export, issue free passes, resend a pass email
-  with the original PDF, cancel with policy-aware refund allocation, amend
-  quantity/city/date/ticket type (upgrade reissues the pass, downgrade requires refund)
+- **Bookings** — search/filter, Excel/PDF export, issue free passes, resend a pass email
+  with the original PDF, cancel the whole booking or only some seats with a refund,
+  amend quantity/city/date/ticket type (upgrade reissues the pass, downgrade records
+  the refund), and a per-row money trail of every seat or fare change
 - **Check-in** — per-day QR scans, gate binding, duplicate-gate alerts, entry blocklist
 - **Staff** — KYC documents, OTP verification, block/update/delete
 - **Emails** — every outbound mail is logged (kind, recipient, status, reference)
@@ -141,8 +144,22 @@ server and are refused offline — staff are told to ask for the printed pass.
   captured payments (newest first) in `event_payments`.
 - Refunds must be completed in the Razorpay dashboard; the admin action records the
   refund and updates the booking to `refunded`.
+- A group pass can be cancelled seat by seat: pick the attendees leaving, and the
+  fare is recalculated for the seats that stay (coupon discount included). The QR is
+  reissued, the old one stops working, and the remaining attendees receive a fresh
+  pass email. The primary buyer always stays on the pass.
+- Every money-moving change — seats removed, a cheaper ticket, a lower fare, a
+  part-refund — is written to `event_booking_adjustments` with amount before/after,
+  refund, reference, reason, removed attendees and the admin who did it. Bookings →
+  Details shows this trail.
+- Reports therefore derive money from the booking fare plus the adjustment ledger,
+  not from raw payment rows:
+  - **Collected** — money actually taken in (fare held + everything refunded)
+  - **Refunds returned** — whole-booking refunds plus adjustment refunds
+  - **Net revenue** — fare still held, plus any cancellation fee deliberately kept
 - Upgrades/date changes collect any price difference, reissue the PDF pass and store
-  the change in the audit log. Downgrades that owe money are routed to refund first.
+  the change in the audit log. A downgrade asks for the refund in the same step, so a
+  cheaper pass can no longer silently drop money out of the totals.
 
 ## Emails and PDF passes
 

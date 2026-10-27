@@ -1,8 +1,26 @@
+import crypto from 'node:crypto';
 import { query, withTransaction } from '../db.js';
 import { HttpError, makeQrToken } from './util.js';
 import { sendPassEmail } from './mailer.js';
 import { audit } from './auth.js';
 import { attendeeEmails } from './attendees.js';
+
+const POLICY_KEYS = ['legal_terms', 'legal_privacy', 'legal_refund'];
+
+/**
+ * Fingerprint of the legal text the devotee accepted. Admins rewrite those pages from Page
+ * content, so a bare timestamp cannot prove which wording was agreed to.
+ */
+export async function policyVersion() {
+  const rows = await query(
+    `SELECT content_key, CAST(value_json AS CHAR) AS body
+       FROM event_content
+      WHERE content_key IN ('legal_terms','legal_privacy','legal_refund')`,
+  );
+  const byKey = new Map(rows.map((row) => [row.content_key, row.body ?? '']));
+  const canonical = POLICY_KEYS.map((key) => `${key}=${byKey.get(key) ?? ''}`).join('&');
+  return `sha256:${crypto.createHash('sha256').update(canonical).digest('hex').slice(0, 16)}`;
+}
 
 export const PASS_SELECT = `
   SELECT b.id, b.reference, b.name, b.email, b.phone, b.qty, b.pass_days, b.unit_price, b.amount, b.status,

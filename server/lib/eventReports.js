@@ -67,17 +67,49 @@ const FROM_SQL = `
   LEFT JOIN admins ra ON ra.id = b.refunded_by
 `;
 
+/**
+ * Money back and money kept, written by every admin flow that moves money. A cancelled seat batch
+ * or a cheaper ticket records the fare released and the refund; whatever was not refunded stays as
+ * a cancellation fee. Revenue is the fare still held plus that fee — so re-pricing a pass cannot
+ * silently drop money out of the dashboard.
+ */
+const ADJUSTMENT_REFUNDS_SQL = `COALESCE((SELECT SUM(a.refund_amount)
+  FROM event_booking_adjustments a WHERE a.booking_id = b.id), 0)`;
+const FEE_SQL = `COALESCE((SELECT SUM(GREATEST(0, (a.amount_before - a.amount_after) - a.refund_amount))
+  FROM event_booking_adjustments a WHERE a.booking_id = b.id), 0)`;
+const REFUNDS_SQL = `(COALESCE(b.refund_amount, 0) + ${ADJUSTMENT_REFUNDS_SQL})`;
+const KEPT_SQL = `(CASE
+  WHEN b.status = 'pending' THEN 0
+  WHEN b.status = 'paid' THEN b.amount + ${FEE_SQL}
+  ELSE b.amount - COALESCE(b.refund_amount, 0) + ${FEE_SQL}
+END)`;
+const COLLECTED_SQL = `(${KEPT_SQL} + (CASE WHEN b.status = 'pending' THEN 0 ELSE ${REFUNDS_SQL} END))`;
+
+export const moneySql = { collected: COLLECTED_SQL, refunds: REFUNDS_SQL, net: KEPT_SQL };
+
 const SELECT_COLUMNS = `
   b.id, b.reference, b.event_id, b.schedule_id, b.name, b.email, b.phone, b.qty, b.pass_days,
   b.unit_price, b.amount, b.status,
+  ${COLLECTED_SQL} AS collected_amount, ${REFUNDS_SQL} AS refunds_total, ${KEPT_SQL} AS net_amount,
+  COALESCE((SELECT SUM(p.amount) FROM event_payments p
+            WHERE p.booking_id = b.id AND p.status IN ('captured','refunded')), 0) AS captured_amount,
   b.source, b.guest_category, b.coupon_code, b.discount_amount, b.gross_amount, b.admin_note,
-  b.otp_verified_at, b.pass_sent_at, b.check_in_at, b.created_at,
+  b.otp_verified_at, b.terms_accepted_at, b.terms_version, b.terms_ip,
+  b.pass_sent_at, b.check_in_at, b.created_at,
   b.cancelled_at, b.cancel_reason, b.refund_amount, b.refund_reference, b.refunded_at,
   (SELECT GROUP_CONCAT(att.name ORDER BY att.position SEPARATOR ' | ')
      FROM event_booking_attendees att WHERE att.booking_id = b.id) AS attendee_names,
   (SELECT JSON_ARRAYAGG(JSON_OBJECT('position', att.position, 'name', att.name,
                                     'phone', att.phone, 'email', att.email))
      FROM event_booking_attendees att WHERE att.booking_id = b.id) AS attendees_json,
+  (SELECT JSON_ARRAYAGG(JSON_OBJECT('id', adj.id, 'kind', adj.kind, 'seats', adj.seats_removed,
+                                    'amountBefore', adj.amount_before, 'amountAfter', adj.amount_after,
+                                    'refund', adj.refund_amount, 'reference', adj.refund_reference,
+                                    'reason', adj.reason, 'removed', adj.removed_attendees,
+                                    'created_at', DATE_FORMAT(adj.created_at, '%Y-%m-%dT%H:%i:%s'),
+                                    'by', adm.name))
+     FROM event_booking_adjustments adj LEFT JOIN admins adm ON adm.id = adj.created_by
+     WHERE adj.booking_id = b.id) AS adjustments_json,
   e.name_en AS event_en, e.name_hi AS event_hi, e.kind,
   tt.name_en AS ticket_en, tt.name_hi AS ticket_hi,
   s.event_date, s.end_date,
@@ -101,7 +133,9 @@ export async function bookingSummary(filters) {
   const [totals] = await query(
     `SELECT COUNT(*) AS bookings,
             COALESCE(SUM(b.qty), 0) AS seats,
-            COALESCE(SUM(CASE WHEN b.status = 'paid' THEN b.amount ELSE 0 END), 0) AS revenue,
+            COALESCE(SUM(CASE WHEN b.status <> 'pending' THEN ${COLLECTED_SQL} ELSE 0 END), 0) AS collected,
+            COALESCE(SUM(CASE WHEN b.status <> 'pending' THEN ${REFUNDS_SQL} ELSE 0 END), 0) AS refunds,
+            COALESCE(SUM(CASE WHEN b.status <> 'pending' THEN ${KEPT_SQL} ELSE 0 END), 0) AS revenue,
             COALESCE(SUM(b.status = 'paid'), 0) AS paid,
             COALESCE(SUM(b.status = 'pending'), 0) AS pending,
             COALESCE(SUM(b.status = 'cancelled'), 0) AS cancelled,
@@ -115,7 +149,9 @@ export async function bookingSummary(filters) {
     `SELECT st.id, st.name_en, st.name_hi,
             COUNT(*) AS bookings,
             COALESCE(SUM(b.qty), 0) AS seats,
-            COALESCE(SUM(CASE WHEN b.status = 'paid' THEN b.amount ELSE 0 END), 0) AS revenue,
+            COALESCE(SUM(CASE WHEN b.status <> 'pending' THEN ${COLLECTED_SQL} ELSE 0 END), 0) AS collected,
+            COALESCE(SUM(CASE WHEN b.status <> 'pending' THEN ${REFUNDS_SQL} ELSE 0 END), 0) AS refunds,
+            COALESCE(SUM(CASE WHEN b.status <> 'pending' THEN ${KEPT_SQL} ELSE 0 END), 0) AS revenue,
             COALESCE(SUM(b.check_in_at IS NOT NULL), 0) AS checked_in
      ${FROM_SQL} ${where}
      GROUP BY st.id, st.name_en, st.name_hi ORDER BY revenue DESC, seats DESC`,
@@ -126,6 +162,8 @@ export async function bookingSummary(filters) {
     totals: {
       bookings: Number(totals.bookings),
       seats: Number(totals.seats),
+      collected: Number(totals.collected),
+      refunds: Number(totals.refunds),
       revenue: Number(totals.revenue),
       paid: Number(totals.paid),
       pending: Number(totals.pending),
@@ -139,6 +177,8 @@ export async function bookingSummary(filters) {
       name_hi: row.name_hi,
       bookings: Number(row.bookings),
       seats: Number(row.seats),
+      collected: Number(row.collected),
+      refunds: Number(row.refunds),
       revenue: Number(row.revenue),
       checkedIn: Number(row.checked_in),
     })),
@@ -172,29 +212,38 @@ function summariseRows(rows) {
   const byCity = new Map();
   const byTicket = new Map();
 
+  const money = (row) => {
+    if (row.status === 'pending') return { collected: 0, refunds: 0, net: 0 };
+    const collected = Number(row.collected_amount || 0);
+    const refunds = Number(row.refunds_total || 0);
+    return { collected, refunds, net: collected - refunds };
+  };
+
   for (const row of rows) {
-    const paidAmount = row.status === 'paid' ? Number(row.amount) : 0;
+    const paid = money(row);
     const stateKey = row.state_en;
     const cityKey = `${row.city_en} (${row.state_en})`;
     const ticketKey = `${row.ticket_en} · ${row.event_en}`;
 
-    const state = byState.get(stateKey) || { name: stateKey, bookings: 0, seats: 0, revenue: 0, checkedIn: 0 };
+    const state = byState.get(stateKey) || { name: stateKey, bookings: 0, seats: 0, collected: 0, refunds: 0, revenue: 0, checkedIn: 0 };
     state.bookings += 1;
     state.seats += Number(row.qty);
-    state.revenue += paidAmount;
+    state.collected += paid.collected;
+    state.refunds += paid.refunds;
+    state.revenue += paid.net;
     if (row.check_in_at) state.checkedIn += 1;
     byState.set(stateKey, state);
 
     const city = byCity.get(cityKey) || { name: cityKey, bookings: 0, seats: 0, revenue: 0 };
     city.bookings += 1;
     city.seats += Number(row.qty);
-    city.revenue += paidAmount;
+    city.revenue += paid.net;
     byCity.set(cityKey, city);
 
     const ticket = byTicket.get(ticketKey) || { name: ticketKey, bookings: 0, seats: 0, revenue: 0 };
     ticket.bookings += 1;
     ticket.seats += Number(row.qty);
-    ticket.revenue += paidAmount;
+    ticket.revenue += paid.net;
     byTicket.set(ticketKey, ticket);
   }
 
@@ -203,12 +252,17 @@ function summariseRows(rows) {
     byState: [...byState.values()].sort(sortByRevenue),
     byCity: [...byCity.values()].sort(sortByRevenue),
     byTicket: [...byTicket.values()].sort(sortByRevenue),
-    totals: {
-      bookings: rows.length,
-      seats: rows.reduce((sum, row) => sum + Number(row.qty), 0),
-      revenue: rows.reduce((sum, row) => sum + (row.status === 'paid' ? Number(row.amount) : 0), 0),
-      checkedIn: rows.filter((row) => row.check_in_at).length,
-    },
+    totals: rows.reduce((sum, row) => {
+      const paid = money(row);
+      return {
+        bookings: sum.bookings + 1,
+        seats: sum.seats + Number(row.qty),
+        collected: sum.collected + paid.collected,
+        refunds: sum.refunds + paid.refunds,
+        revenue: sum.revenue + paid.net,
+        checkedIn: sum.checkedIn + (row.check_in_at ? 1 : 0),
+      };
+    }, { bookings: 0, seats: 0, collected: 0, refunds: 0, revenue: 0, checkedIn: 0 }),
   };
 }
 
@@ -271,11 +325,13 @@ export async function exportBookingsXlsx(filters) {
   cover.getColumn(3).width = 18;
   cover.getColumn(4).width = 18;
   cover.getColumn(5).width = 16;
-  cover.mergeCells('A1:E1');
+  cover.getColumn(6).width = 18;
+  cover.getColumn(7).width = 16;
+  cover.mergeCells('A1:G1');
   cover.getCell('A1').value = 'Adhyatmik Bharat — Event booking report';
   cover.getCell('A1').font = { bold: true, size: 18, color: { argb: 'FF0F2342' } };
   cover.getRow(1).height = 30;
-  cover.mergeCells('A2:E2');
+  cover.mergeCells('A2:G2');
   cover.getCell('A2').value = `Generated ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })} · ${filterText}`;
   cover.getCell('A2').font = { size: 10, color: { argb: 'FF5F6B80' } };
   cover.getRow(2).height = 22;
@@ -283,7 +339,9 @@ export async function exportBookingsXlsx(filters) {
   const totals = [
     ['Total bookings', summary.totals.bookings],
     ['Total seats', summary.totals.seats],
-    ['Paid revenue (INR)', summary.totals.revenue],
+    ['Collected (INR)', summary.totals.collected],
+    ['Refunds returned (INR)', summary.totals.refunds],
+    ['Net revenue (INR)', summary.totals.revenue],
     ['Checked in', summary.totals.checkedIn],
   ];
   totals.forEach(([label, value], index) => {
@@ -292,33 +350,36 @@ export async function exportBookingsXlsx(filters) {
     row.getCell(1).font = { bold: true, color: { argb: 'FF5F6B80' } };
     row.getCell(2).value = value;
     row.getCell(2).font = { bold: true, size: 13, color: { argb: 'FF0F2342' } };
-    if (label.includes('revenue')) row.getCell(2).numFmt = '₹#,##0';
+    if (label.includes('INR')) row.getCell(2).numFmt = '₹#,##0';
   });
 
-  cover.getCell('A10').value = 'Visitors and revenue by state';
-  cover.getCell('A10').font = { bold: true, size: 12, color: { argb: 'FF0F2342' } };
-  const stateHeader = cover.getRow(12);
-  stateHeader.values = ['State', 'Bookings', 'Seats', 'Revenue (INR)', 'Checked in'];
+  cover.getCell('A11').value = 'Visitors and net revenue by state';
+  cover.getCell('A11').font = { bold: true, size: 12, color: { argb: 'FF0F2342' } };
+  const stateHeader = cover.getRow(13);
+  stateHeader.values = ['State', 'Bookings', 'Seats', 'Collected (INR)', 'Refunds (INR)', 'Net revenue (INR)', 'Checked in'];
   styleHeaderRow(stateHeader);
   summary.byState.forEach((row, index) => {
-    const excelRow = cover.getRow(13 + index);
-    excelRow.values = [row.name, row.bookings, row.seats, row.revenue, row.checkedIn];
-    excelRow.getCell(4).numFmt = '₹#,##0';
+    const excelRow = cover.getRow(14 + index);
+    excelRow.values = [row.name, row.bookings, row.seats, row.collected, row.refunds, row.revenue, row.checkedIn];
+    [4, 5, 6].forEach((column) => { excelRow.getCell(column).numFmt = '₹#,##0'; });
     excelRow.eachCell((cell) => { cell.font = { size: 9 }; });
   });
-  const stateTotalRow = cover.getRow(13 + summary.byState.length);
-  stateTotalRow.values = ['Total', summary.totals.bookings, summary.totals.seats, summary.totals.revenue, summary.totals.checkedIn];
+  const stateTotalRow = cover.getRow(14 + summary.byState.length);
+  stateTotalRow.values = [
+    'Total', summary.totals.bookings, summary.totals.seats,
+    summary.totals.collected, summary.totals.refunds, summary.totals.revenue, summary.totals.checkedIn,
+  ];
   stateTotalRow.font = { bold: true, size: 9 };
-  stateTotalRow.getCell(4).numFmt = '₹#,##0';
+  [4, 5, 6].forEach((column) => { stateTotalRow.getCell(column).numFmt = '₹#,##0'; });
 
-  addTableSheet(workbook, 'By city', 'Visitors and revenue by city', [
+  addTableSheet(workbook, 'By city', 'Visitors and net revenue by city', [
     { header: 'City (State)', width: 34 }, { header: 'Bookings', width: 14 },
-    { header: 'Seats', width: 14 }, { header: 'Revenue (INR)', width: 20, money: true },
+    { header: 'Seats', width: 14 }, { header: 'Net revenue (INR)', width: 20, money: true },
   ], summary.byCity.map((row) => [row.name, row.bookings, row.seats, row.revenue]));
 
-  addTableSheet(workbook, 'By ticket', 'Visitors and revenue by ticket', [
+  addTableSheet(workbook, 'By ticket', 'Visitors and net revenue by ticket', [
     { header: 'Ticket (Event)', width: 44 }, { header: 'Bookings', width: 14 },
-    { header: 'Seats', width: 14 }, { header: 'Revenue (INR)', width: 20, money: true },
+    { header: 'Seats', width: 14 }, { header: 'Net revenue (INR)', width: 20, money: true },
   ], summary.byTicket.map((row) => [row.name, row.bookings, row.seats, row.revenue]));
 
   addTableSheet(
@@ -353,6 +414,9 @@ export async function exportBookingsXlsx(filters) {
       { header: 'Cancelled at', width: 20 },
       { header: 'Cancelled by', width: 18 },
       { header: 'Cancel reason', width: 32 },
+      { header: 'Collected', width: 14, money: true },
+      { header: 'Refunds', width: 14, money: true },
+      { header: 'Net', width: 14, money: true },
       { header: 'Refund', width: 14, money: true },
       { header: 'Refund ref', width: 22 },
       { header: 'Refunded at', width: 20 },
@@ -366,6 +430,9 @@ export async function exportBookingsXlsx(filters) {
       row.venue_en, row.address_en, row.event_date, row.created_at, row.otp_verified_at ? 'Yes' : 'No',
       row.check_in_at || '', row.checked_in_by_name || '',
       row.cancelled_at || '', row.cancelled_by_name || '', row.cancel_reason || '',
+      row.status === 'pending' ? 0 : Number(row.collected_amount || 0),
+      row.status === 'pending' ? 0 : Number(row.refunds_total || 0),
+      row.status === 'pending' ? 0 : Number(row.collected_amount || 0) - Number(row.refunds_total || 0),
       row.refund_amount == null ? '' : Number(row.refund_amount),
       row.refund_reference || '', row.refunded_at || '',
     ]),
@@ -406,26 +473,28 @@ export async function exportBookingsPdf(filters) {
     const cards = [
       ['Bookings', String(summary.totals.bookings)],
       ['Seats', String(summary.totals.seats)],
-      ['Revenue', `Rs ${summary.totals.revenue.toLocaleString('en-IN')}`],
+      ['Collected', `Rs ${summary.totals.collected.toLocaleString('en-IN')}`],
+      ['Refunds', `Rs ${summary.totals.refunds.toLocaleString('en-IN')}`],
+      ['Net revenue', `Rs ${summary.totals.revenue.toLocaleString('en-IN')}`],
       ['Checked in', String(summary.totals.checkedIn)],
     ];
-    const cardWidth = (pageWidth - 30) / 4;
+    const cardWidth = (pageWidth - 50) / 6;
     const cardY = doc.y;
     cards.forEach(([label, value], index) => {
       const x = 32 + index * (cardWidth + 10);
       doc.roundedRect(x, cardY, cardWidth, 52, 8).fillAndStroke('#FAF6E5', '#E5E1D3');
-      doc.fillColor(muted).font('Helvetica').fontSize(8).text(label.toUpperCase(), x + 12, cardY + 10);
-      doc.fillColor(lotus).font('Helvetica-Bold').fontSize(16).text(value, x + 12, cardY + 24);
+      doc.fillColor(muted).font('Helvetica').fontSize(7).text(label.toUpperCase(), x + 10, cardY + 10, { width: cardWidth - 16 });
+      doc.fillColor(lotus).font('Helvetica-Bold').fontSize(13).text(value, x + 10, cardY + 26, { width: cardWidth - 16 });
     });
     doc.y = cardY + 70;
 
-    doc.fillColor(ink).font('Helvetica-Bold').fontSize(12).text('Visitors by state');
+    doc.fillColor(ink).font('Helvetica-Bold').fontSize(12).text('Visitors and net revenue by state');
     doc.moveDown(0.4);
     const stateX = 32;
     let y = doc.y;
-    const stateCols = [190, 80, 80, 110, 80];
+    const stateCols = [160, 60, 55, 85, 80, 90, 65];
     doc.font('Helvetica-Bold').fontSize(8).fillColor(muted);
-    ['STATE', 'BOOKINGS', 'SEATS', 'REVENUE (INR)', 'CHECKED IN'].forEach((label, i) => {
+    ['STATE', 'BOOKINGS', 'SEATS', 'COLLECTED', 'REFUNDS', 'NET REVENUE', 'CHECKED IN'].forEach((label, i) => {
       doc.text(label, stateX + stateCols.slice(0, i).reduce((a, b) => a + b, 0), y, { width: stateCols[i] });
     });
     y += 14;
@@ -433,7 +502,11 @@ export async function exportBookingsPdf(filters) {
     y += 6;
     doc.font('Helvetica').fontSize(9).fillColor(ink);
     summary.byState.forEach((row) => {
-      const cells = [row.name, String(row.bookings), String(row.seats), row.revenue.toLocaleString('en-IN'), String(row.checkedIn)];
+      const cells = [
+        row.name, String(row.bookings), String(row.seats),
+        row.collected.toLocaleString('en-IN'), row.refunds.toLocaleString('en-IN'),
+        row.revenue.toLocaleString('en-IN'), String(row.checkedIn),
+      ];
       cells.forEach((cell, i) => {
         doc.text(cell, stateX + stateCols.slice(0, i).reduce((a, b) => a + b, 0), y, { width: stateCols[i] });
       });
@@ -489,7 +562,7 @@ export async function exportBookingsPdf(filters) {
           row.status,
           row.guest_category && row.guest_category !== 'visitor' ? row.guest_category : '',
           row.source === 'admin_free' ? 'free issue' : '',
-          row.refund_amount != null ? `refund Rs ${Number(row.refund_amount).toLocaleString('en-IN')}` : '',
+          Number(row.refunds_total) > 0 ? `refund Rs ${Number(row.refunds_total).toLocaleString('en-IN')}` : '',
         ].filter(Boolean).join(' · '),
         row.check_in_at ? 'Checked in' : '—',
       ];

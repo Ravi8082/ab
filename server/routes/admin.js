@@ -22,6 +22,7 @@ import {
   exportBookingsPdf,
   exportBookingsXlsx,
   fetchAdminBookings,
+  moneySql,
   parseBookingFilters,
 } from '../lib/eventReports.js';
 import { checkInBooking } from '../lib/checkin.js';
@@ -568,16 +569,20 @@ adminRouter.get(
       query(
         `SELECT COUNT(*) AS bookings,
                 COALESCE(SUM(CASE WHEN status = 'paid' THEN qty ELSE 0 END), 0) AS seats,
-                COALESCE(SUM(CASE WHEN status = 'paid' THEN amount ELSE 0 END), 0) AS revenue,
+                COALESCE(SUM(CASE WHEN status <> 'pending' THEN ${moneySql.collected} ELSE 0 END), 0) AS collected,
+                COALESCE(SUM(CASE WHEN status <> 'pending' THEN ${moneySql.refunds} ELSE 0 END), 0) AS refunds,
+                COALESCE(SUM(CASE WHEN status <> 'pending' THEN ${moneySql.net} ELSE 0 END), 0) AS revenue,
                 COALESCE(SUM(status = 'pending'), 0) AS pending,
                 COALESCE(SUM(check_in_at IS NOT NULL), 0) AS checkins
-         FROM event_bookings`,
+         FROM event_bookings b`,
       ),
       query(
         `SELECT st.id, st.name_en, st.name_hi,
                 COUNT(DISTINCT b.id) AS bookings,
                 COALESCE(SUM(CASE WHEN b.status = 'paid' THEN b.qty ELSE 0 END), 0) AS seats,
-                COALESCE(SUM(CASE WHEN b.status = 'paid' THEN b.amount ELSE 0 END), 0) AS revenue
+                COALESCE(SUM(CASE WHEN b.status <> 'pending' THEN ${moneySql.collected} ELSE 0 END), 0) AS collected,
+                COALESCE(SUM(CASE WHEN b.status <> 'pending' THEN ${moneySql.refunds} ELSE 0 END), 0) AS refunds,
+                COALESCE(SUM(CASE WHEN b.status <> 'pending' THEN ${moneySql.net} ELSE 0 END), 0) AS revenue
          FROM event_states st
          LEFT JOIN event_cities c ON c.state_id = st.id
          LEFT JOIN event_schedules s ON s.city_id = c.id
@@ -606,7 +611,7 @@ adminRouter.get(
         `SELECT e.id, e.name_en, e.name_hi, e.kind,
                 COUNT(b.id) AS bookings,
                 COALESCE(SUM(CASE WHEN b.status = 'paid' THEN b.qty ELSE 0 END), 0) AS seats,
-                COALESCE(SUM(CASE WHEN b.status = 'paid' THEN b.amount ELSE 0 END), 0) AS revenue
+                COALESCE(SUM(CASE WHEN b.status <> 'pending' THEN ${moneySql.net} ELSE 0 END), 0) AS revenue
          FROM events e LEFT JOIN event_bookings b ON b.event_id = e.id
          WHERE e.active = 1 GROUP BY e.id ORDER BY e.sort_order`,
       ),
@@ -632,6 +637,8 @@ adminRouter.get(
       totals: {
         bookings: Number(totals.bookings),
         seats: Number(totals.seats),
+        collected: Number(totals.collected),
+        refunds: Number(totals.refunds),
         revenue: Number(totals.revenue),
         pending: Number(totals.pending),
         checkins: Number(totals.checkins),
@@ -640,6 +647,8 @@ adminRouter.get(
         ...row,
         bookings: Number(row.bookings),
         seats: Number(row.seats),
+        collected: Number(row.collected),
+        refunds: Number(row.refunds),
         revenue: Number(row.revenue),
       })),
       byTicket: byTicket.map((row) => ({
@@ -1517,18 +1526,25 @@ adminRouter.get(
       bookingSummary(filters),
     ]);
     const bookings = rows.map((row) => {
-      let attendees = [];
-      if (Array.isArray(row.attendees_json)) {
-        attendees = row.attendees_json;
-      } else if (row.attendees_json) {
+      const list = (value) => {
+        if (Array.isArray(value)) return value;
+        if (!value) return [];
         try {
-          const parsed = JSON.parse(String(row.attendees_json));
-          if (Array.isArray(parsed)) attendees = parsed;
+          const parsed = JSON.parse(String(value));
+          return Array.isArray(parsed) ? parsed : [];
         } catch {
-          attendees = [];
+          return [];
         }
-      }
-      return { ...row, attendees };
+      };
+      return {
+        ...row,
+        collected_amount: Number(row.collected_amount || 0),
+        refunds_total: Number(row.refunds_total || 0),
+        net_amount: Number(row.net_amount || 0),
+        captured_amount: Number(row.captured_amount || 0),
+        attendees: list(row.attendees_json),
+        adjustments: list(row.adjustments_json),
+      };
     });
     res.json({ bookings, summary });
   }),
@@ -3022,6 +3038,9 @@ const amendBookingSchema = z.object({
   qty: z.coerce.number().int().min(1).max(20),
   reason: z.string().trim().min(3).max(255),
   paymentReference: z.string().trim().max(120).optional(),
+  // A cheaper ticket or fewer seats releases money; record how much went back, when.
+  refundAmount: z.coerce.number().int().min(0).max(10000000).optional(),
+  refundReference: z.string().trim().max(120).optional(),
   attendees: z.array(issueAttendeeSchema).max(19).default([]),
 });
 
@@ -3119,6 +3138,18 @@ adminRouter.post(
         );
       }
 
+      const refund = Number(input.refundAmount ?? 0);
+      const released = Math.max(0, -delta);
+      if (delta >= 0 && refund > 0) {
+        throw new HttpError(400, 'This change does not lower the fare, so there is nothing to refund.');
+      }
+      if (refund > released) {
+        throw new HttpError(
+          400,
+          `The refund cannot exceed ₹${released.toLocaleString('en-IN')} released by this change.`,
+        );
+      }
+
       const scheduleDays = Math.max(1, Number(schedule.schedule_days) || 1);
       const passDays = Math.max(1, Math.min(Number(ticket.valid_days) || 1, scheduleDays));
       const qrToken = makeQrToken();
@@ -3154,6 +3185,29 @@ adminRouter.post(
         );
       }
 
+      if (delta < 0) {
+        const removed = publicPass(booking).attendees.filter((person) => person.position > input.qty);
+        await recordAdjustment(conn, {
+          bookingId: booking.id,
+          kind: 'fare_reduced',
+          seatsRemoved: Math.max(0, Number(booking.qty) - input.qty),
+          amountBefore: oldAmount,
+          amountAfter: newAmount,
+          refundAmount: refund,
+          refundReference: input.refundReference,
+          reason: input.reason,
+          removedAttendees: removed,
+          adminId: req.admin.id,
+        });
+        if (refund > 0) {
+          await recordRefundOnPayment(conn, booking.id, {
+            refundAmount: refund,
+            refundReference: input.refundReference || null,
+            adminId: req.admin.id,
+          });
+        }
+      }
+
       if (delta > 0) {
         await conn.execute(
           `INSERT INTO event_payments (booking_id, provider, provider_ref, amount, status, raw)
@@ -3173,7 +3227,7 @@ adminRouter.post(
         );
       }
 
-      return { pricing, newGross, discount, newAmount, delta, passDays, oldAmount };
+      return { pricing, newGross, discount, newAmount, delta, passDays, oldAmount, refund };
     });
 
     const updated = await loadBookingById(booking.id);
@@ -3223,9 +3277,28 @@ adminRouter.post(
         newAmount: outcome.newAmount,
         delta: outcome.delta,
         paymentReference: input.paymentReference || null,
+        refundAmount: outcome.refund,
+        refundReference: input.refundReference || null,
       },
       ip: clientIp(req),
     });
+
+    if (outcome.refund > 0) {
+      await audit({
+        actorType: 'admin',
+        actorId: req.admin.id,
+        action: 'event.booking.refunded',
+        entity: 'event_booking',
+        entityId: String(updated.id),
+        meta: {
+          reference: updated.reference,
+          refundAmount: outcome.refund,
+          refundReference: input.refundReference || null,
+          reason: input.reason,
+        },
+        ip: clientIp(req),
+      });
+    }
 
     res.json({
       pass,
@@ -3233,6 +3306,7 @@ adminRouter.post(
       difference: outcome.delta,
       extraPaid: Math.max(0, outcome.delta),
       refundDue: Math.max(0, -outcome.delta),
+      refundRecorded: outcome.refund,
     });
   }),
 );
@@ -3280,6 +3354,31 @@ async function sendCancellationNotice(row, { reason, refundAmount, refundReferen
   } catch (err) {
     console.error(`[booking-notice] ${row.reference}:`, err.message);
   }
+}
+
+/** One row per money-moving change, so a re-priced or part-cancelled booking keeps its history. */
+async function recordAdjustment(conn, {
+  bookingId, kind, seatsRemoved, amountBefore, amountAfter, refundAmount,
+  refundReference, reason, removedAttendees = [], adminId,
+}) {
+  await conn.execute(
+    `INSERT INTO event_booking_adjustments
+       (booking_id, kind, seats_removed, amount_before, amount_after, refund_amount,
+        refund_reference, reason, removed_attendees, created_by)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      bookingId,
+      kind,
+      seatsRemoved,
+      amountBefore,
+      amountAfter,
+      refundAmount,
+      refundReference || null,
+      reason,
+      removedAttendees.length ? JSON.stringify(removedAttendees) : null,
+      adminId,
+    ],
+  );
 }
 
 /** Allocates a refund across captured payments (newest first) and keeps the trail in each payment's raw JSON. */
@@ -3503,6 +3602,218 @@ adminRouter.post(
 
     const updated = await loadBookingById(row.id);
     res.json({ pass: publicPass(updated), refunded: true });
+  }),
+);
+
+const cancelSeatsSchema = z.object({
+  qty: z.coerce.number().int().min(1).max(19),
+  reason: z.string().trim().min(3).max(255),
+  refundAmount: z.coerce.number().int().min(0).max(10000000).default(0),
+  refundReference: z.string().trim().max(120).optional(),
+  positions: z.array(z.coerce.number().int().min(2)).max(19).optional(),
+});
+
+/**
+ * Cancels part of a group pass: 4 seats out of 20. The rest of the pass stays valid, so this
+ * releases only those seats and reissues the QR. The money released and any refund go into the
+ * adjustment ledger — that is what the dashboard reads, not the rewritten booking amount.
+ */
+adminRouter.post(
+  '/bookings/:id/cancel-seats',
+  asyncHandler(async (req, res) => {
+    const parsed = cancelSeatsSchema.safeParse(req.body);
+    if (!parsed.success) {
+      throw new HttpError(400, 'Choose the seats to cancel, a reason and any refund due.', parsed.error.flatten().fieldErrors);
+    }
+    const input = parsed.data;
+
+    const booking = await loadBookingById(req.params.id);
+    if (!booking) throw new HttpError(404, 'Booking not found.');
+    if (booking.status !== 'paid') throw new HttpError(409, 'Only a paid pass can have seats cancelled.');
+    if (Number(booking.check_in_count) > 0) {
+      throw new HttpError(409, 'This pass has already been scanned at the gate, so seats can no longer be removed.');
+    }
+    if (input.qty >= Number(booking.qty)) {
+      throw new HttpError(400, 'Use the full cancellation action to cancel every seat on this pass.');
+    }
+
+    const outcome = await withTransaction(async (conn) => {
+      const [lockedRows] = await conn.execute(
+        `SELECT id, status, qty, amount, unit_price, discount_amount, coupon_code
+         FROM event_bookings WHERE id = ? FOR UPDATE`,
+        [booking.id],
+      );
+      const locked = lockedRows[0];
+      if (!locked || locked.status !== 'paid') {
+        throw new HttpError(409, 'This booking changed status. Refresh the list and try again.');
+      }
+      const [usedRows] = await conn.execute(
+        'SELECT COUNT(*) AS n FROM event_booking_checkins WHERE booking_id = ?',
+        [booking.id],
+      );
+      if (Number(usedRows[0].n) > 0) {
+        throw new HttpError(409, 'This pass has already been used at the gate, so seats can no longer be removed.');
+      }
+
+      const oldQty = Number(locked.qty);
+      const oldAmount = Number(locked.amount);
+      const remainingQty = oldQty - input.qty;
+      if (remainingQty < 1) {
+        throw new HttpError(400, 'Use the full cancellation action to cancel every seat on this pass.');
+      }
+
+      const [people] = await conn.execute(
+        `SELECT position, name, phone, email FROM event_booking_attendees
+         WHERE booking_id = ? ORDER BY position`,
+        [booking.id],
+      );
+      let removed;
+      let kept;
+      if (input.positions?.length) {
+        const wanted = [...new Set(input.positions)];
+        if (wanted.length !== input.qty) {
+          throw new HttpError(400, `Pick exactly ${input.qty} attendee(s) to cancel.`);
+        }
+        const known = new Set(people.map((person) => Number(person.position)));
+        if (wanted.some((position) => !known.has(position))) {
+          throw new HttpError(400, 'One of those attendees is not on this booking.');
+        }
+        const drop = new Set(wanted);
+        removed = people.filter((person) => drop.has(Number(person.position)));
+        kept = people.filter((person) => !drop.has(Number(person.position)));
+      } else {
+        removed = people.filter((person) => Number(person.position) > 1).slice(-input.qty);
+        const drop = new Set(removed.map((person) => Number(person.position)));
+        kept = people.filter((person) => !drop.has(Number(person.position)));
+      }
+      if (people.length > 0 && removed.length !== input.qty) {
+        throw new HttpError(400, 'Pick which named attendees are leaving — the booking has no spare unnamed seats.');
+      }
+
+      const newGross = Number(locked.unit_price) * remainingQty;
+      const discount = Math.min(Number(locked.discount_amount || 0), newGross);
+      const newAmount = newGross - discount;
+      const released = Math.max(0, oldAmount - newAmount);
+      const refund = Number(input.refundAmount || 0);
+      if (refund > released) {
+        throw new HttpError(
+          400,
+          `The refund cannot exceed ₹${released.toLocaleString('en-IN')} released by these seats.`,
+        );
+      }
+
+      const qrToken = makeQrToken();
+      await conn.execute(
+        `UPDATE event_bookings
+         SET qty = ?, gross_amount = ?, discount_amount = ?, amount = ?, qr_token = ?, pass_sent_at = NULL
+         WHERE id = ?`,
+        [remainingQty, newGross, discount, newAmount, qrToken, booking.id],
+      );
+      if (kept.length > 0) {
+        await replaceAttendees(conn, booking.id, kept);
+      }
+      if (locked.coupon_code) {
+        await conn.execute('UPDATE event_coupon_uses SET amount_off = ? WHERE booking_id = ?', [discount, booking.id]);
+      }
+
+      await recordAdjustment(conn, {
+        bookingId: booking.id,
+        kind: 'seats_cancelled',
+        seatsRemoved: input.qty,
+        amountBefore: oldAmount,
+        amountAfter: newAmount,
+        refundAmount: refund,
+        refundReference: input.refundReference,
+        reason: input.reason,
+        removedAttendees: removed,
+        adminId: req.admin.id,
+      });
+      if (refund > 0) {
+        await recordRefundOnPayment(conn, booking.id, {
+          refundAmount: refund,
+          refundReference: input.refundReference || null,
+          adminId: req.admin.id,
+        });
+      }
+
+      return { oldQty, remainingQty, oldAmount, newAmount, released, refund, removed };
+    });
+
+    await audit({
+      actorType: 'admin',
+      actorId: req.admin.id,
+      action: 'event.booking.seats_cancelled',
+      entity: 'event_booking',
+      entityId: String(booking.id),
+      meta: {
+        reference: booking.reference,
+        reason: input.reason,
+        seatsCancelled: input.qty,
+        seatsBefore: outcome.oldQty,
+        seatsAfter: outcome.remainingQty,
+        amountBefore: outcome.oldAmount,
+        amountAfter: outcome.newAmount,
+        refundAmount: outcome.refund,
+        refundReference: input.refundReference || null,
+        removed: outcome.removed.map((person) => person.name),
+      },
+      ip: clientIp(req),
+    });
+    if (outcome.refund > 0) {
+      await audit({
+        actorType: 'admin',
+        actorId: req.admin.id,
+        action: 'event.booking.refunded',
+        entity: 'event_booking',
+        entityId: String(booking.id),
+        meta: {
+          reference: booking.reference,
+          refundAmount: outcome.refund,
+          refundReference: input.refundReference || null,
+          reason: input.reason,
+        },
+        ip: clientIp(req),
+      });
+    }
+
+    const updated = await loadBookingById(booking.id);
+    const pass = publicPass(updated);
+    const refundLine = outcome.refund > 0
+      ? ` A refund of ₹${outcome.refund.toLocaleString('en-IN')} is being processed and should reach you within 15 working days.`
+      : '';
+    try {
+      await sendPassEmail({
+        to: updated.email,
+        name: updated.name,
+        reference: updated.reference,
+        eventName: updated.event_name_en,
+        ticketName: updated.ticket_name_en,
+        venue: updated.venue_name_en,
+        address: updated.address_en,
+        city: updated.city_name_en,
+        state: updated.state_name_en,
+        dateLabel: updated.date_label_en,
+        mapUrl: bookingMapUrl(updated),
+        qty: Number(updated.qty),
+        amount: Number(updated.amount),
+        qrToken: updated.qr_token,
+        passDays: pass.passDays,
+        attendees: pass.attendees,
+        bookingId: updated.id,
+        note: `${outcome.removed.length || input.qty} seat(s) were cancelled by the Adhyatmik Bharat team at your request.${refundLine} This new QR replaces every earlier pass for this booking — please discard the old one.`,
+      });
+    } catch (err) {
+      console.error(`[seats-cancelled-email] ${updated.reference}:`, err.message);
+    }
+
+    res.json({
+      pass,
+      seatsCancelled: input.qty,
+      seatsLeft: outcome.remainingQty,
+      amountBefore: outcome.oldAmount,
+      amountAfter: outcome.newAmount,
+      refundRecorded: outcome.refund,
+    });
   }),
 );
 

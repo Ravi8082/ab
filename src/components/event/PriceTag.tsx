@@ -39,7 +39,11 @@ export default function PriceTag({
         {actual != null && percent > 0 && (
           <>
             <span className={`font-ui text-xs line-through ${muteTone}`}>{formatRupees(actual)}</span>
-            <span className="inline-flex items-center rounded-full bg-emerald-500/15 px-2 py-0.5 font-ui text-[0.62rem] font-semibold uppercase tracking-[0.1em] text-emerald-700">
+            <span
+              className={`inline-flex items-center rounded-full px-2 py-0.5 font-ui text-[0.62rem] font-semibold uppercase tracking-[0.1em] ${
+                dark ? 'bg-emerald-400/15 text-emerald-200' : 'bg-emerald-500/15 text-emerald-700'
+              }`}
+            >
               {percent}% {lang === 'hi' ? 'छूट' : 'off'}
             </span>
           </>

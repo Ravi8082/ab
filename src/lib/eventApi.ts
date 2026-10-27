@@ -127,6 +127,7 @@ export type LegalPageKey = 'terms' | 'privacy' | 'refund';
 
 export interface LegalPageData {
   page: LegalPageKey;
+  version: string;
   content: {
     title?: Localized;
     intro?: Localized;
@@ -305,7 +306,8 @@ export interface AttendeeInput {
 export const eventApi = {
   page: () => request<EventPageData>('/api/events/page'),
 
-  legal: (page: LegalPageKey) => request<LegalPageData>(`/api/events/legal/${page}`),
+  legal: (page: LegalPageKey, options?: { fresh?: boolean }) =>
+    request<LegalPageData>(`/api/events/legal/${page}${options?.fresh ? '?fresh=1' : ''}`),
 
   joinWaitlist: (input: { stateId: number; name: string; email: string; phone: string }) =>
     request<WaitlistResult>('/api/events/waitlist', { method: 'POST', body: JSON.stringify(input) }),
@@ -327,6 +329,7 @@ export const eventApi = {
     phone: string;
     qty: number;
     acceptTerms: boolean;
+    acceptTermsVersion: string;
     couponCode?: string;
     attendees?: AttendeeInput[];
   }) => request<CreateBookingResult>('/api/events/bookings', { method: 'POST', body: JSON.stringify(input) }),

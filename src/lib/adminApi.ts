@@ -14,6 +14,8 @@ export interface AdminOverview {
   totals: {
     bookings: number;
     seats: number;
+    collected: number;
+    refunds: number;
     revenue: number;
     pending: number;
     checkins: number;
@@ -24,6 +26,8 @@ export interface AdminOverview {
     name_hi: string;
     bookings: number;
     seats: number;
+    collected: number;
+    refunds: number;
     revenue: number;
   }[];
   byTicket: {
@@ -220,6 +224,20 @@ export interface AdminSchedule {
   tickets: Pick<EventTicketRow, 'id' | 'event_id' | 'name_en' | 'name_hi' | 'default_capacity' | 'active'>[];
 }
 
+export interface BookingAdjustment {
+  id: number;
+  kind: 'seats_cancelled' | 'fare_reduced';
+  seats: number;
+  amountBefore: number;
+  amountAfter: number;
+  refund: number;
+  reference: string | null;
+  reason: string;
+  removed: { position: number; name: string; phone: string; email: string | null }[] | null;
+  created_at: string;
+  by: string | null;
+}
+
 export interface AdminBooking {
   id: number;
   reference: string;
@@ -240,6 +258,9 @@ export interface AdminBooking {
   gross_amount: number | null;
   admin_note: string | null;
   otp_verified_at: string | null;
+  terms_accepted_at: string | null;
+  terms_version: string | null;
+  terms_ip: string | null;
   pass_sent_at: string | null;
   check_in_at: string | null;
   created_at: string;
@@ -250,6 +271,11 @@ export interface AdminBooking {
   refund_reference: string | null;
   refunded_at: string | null;
   refunded_by_name: string | null;
+  collected_amount: number;
+  refunds_total: number;
+  net_amount: number;
+  captured_amount: number;
+  adjustments?: BookingAdjustment[];
   attendee_names: string | null;
   attendees?: { position: number; name: string; phone: string; email: string | null }[];
   event_en: string;
@@ -347,13 +373,41 @@ export const adminAmendBooking = (
     qty: number;
     reason: string;
     paymentReference?: string;
+    refundAmount?: number;
+    refundReference?: string;
     attendees: { name: string; phone: string; email?: string }[];
   },
 ) =>
-  request<{ pass: unknown; amount: number; difference: number; extraPaid: number; refundDue: number }>(
+  request<{
+    pass: unknown;
+    amount: number;
+    difference: number;
+    extraPaid: number;
+    refundDue: number;
+    refundRecorded: number;
+  }>(
     `/bookings/${id}/amend`,
     { method: 'POST', body: JSON.stringify(input) },
   );
+
+export const adminCancelSeats = (
+  id: number,
+  input: {
+    qty: number;
+    reason: string;
+    refundAmount: number;
+    refundReference?: string;
+    positions?: number[];
+  },
+) =>
+  request<{
+    pass: unknown;
+    seatsCancelled: number;
+    seatsLeft: number;
+    amountBefore: number;
+    amountAfter: number;
+    refundRecorded: number;
+  }>(`/bookings/${id}/cancel-seats`, { method: 'POST', body: JSON.stringify(input) });
 
 export const adminResendPass = (id: number, email?: string) =>
   request<{ delivered: boolean; to: string; emailConfigured: boolean }>(`/bookings/${id}/resend`, {
@@ -471,6 +525,8 @@ export interface BookingSummary {
   totals: {
     bookings: number;
     seats: number;
+    collected: number;
+    refunds: number;
     revenue: number;
     paid: number;
     pending: number;
@@ -484,6 +540,8 @@ export interface BookingSummary {
     name_hi: string;
     bookings: number;
     seats: number;
+    collected: number;
+    refunds: number;
     revenue: number;
     checkedIn: number;
   }[];

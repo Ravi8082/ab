@@ -30,6 +30,7 @@ import { ApiError, eventApi } from '@/lib/eventApi';
 import { formatRupees } from '@/lib/pricing';
 import { bi, formatDateRange, formatTime, formatTimeRange, kindName } from '@/lib/eventFormat';
 import EventPass from '@/components/event/EventPass';
+import PolicySummary from '@/components/event/PolicySummary';
 import PriceTag from '@/components/event/PriceTag';
 
 type RazorpayCtor = new (options: Record<string, unknown>) => { open: () => void };
@@ -90,6 +91,8 @@ function fieldErrorsFrom(error: unknown): Record<string, string> {
   }
   const terms = details.acceptTerms;
   if (Array.isArray(terms) && terms.length > 0) next.terms = String(terms[0]);
+  const staleTerms = details.acceptTermsVersion;
+  if (staleTerms) next.terms = 'The policy was updated. Please read it again and re-accept.';
   for (const key of ['attendees', 'couponCode']) {
     const value = details[key];
     if (Array.isArray(value) && value.length > 0) next[key] = String(value[0]);
@@ -130,6 +133,8 @@ export default function BookingDrawer({
   const [form, setForm] = useState({ name: '', email: '', phone: '' });
   const [attendees, setAttendees] = useState<AttendeeInput[]>([]);
   const [acceptTerms, setAcceptTerms] = useState(false);
+  const [policyVersion, setPolicyVersion] = useState<string | null>(null);
+  const [policyReload, setPolicyReload] = useState(0);
   const [couponCode, setCouponCode] = useState('');
   const [coupon, setCoupon] = useState<CouponPreview | null>(null);
   const [couponError, setCouponError] = useState('');
@@ -320,6 +325,7 @@ export default function BookingDrawer({
     if (left <= 0) nextErrors.qty = 'This ticket is sold out.';
     if (qty > left) nextErrors.qty = `Only ${left} seat(s) left.`;
     if (!acceptTerms) nextErrors.terms = 'Please accept the terms, privacy and refund policy.';
+    else if (!policyVersion) nextErrors.terms = 'The policy has not loaded yet. Check your connection and retry.';
 
     const firstBadRoster = roster.findIndex(rosterError);
     setRosterTouched(true);
@@ -341,6 +347,7 @@ export default function BookingDrawer({
         phone,
         qty,
         acceptTerms,
+        acceptTermsVersion: policyVersion ?? '',
         couponCode: couponCode.trim() || undefined,
         attendees: roster.length > 0 ? roster : undefined,
       });
@@ -350,8 +357,19 @@ export default function BookingDrawer({
       await sendOtp(created.reference);
       window.setTimeout(() => otpRefs.current[0]?.focus(), 120);
     } catch (error) {
+      const policyMoved =
+        error instanceof ApiError &&
+        Boolean(error.details) &&
+        typeof error.details === 'object' &&
+        'acceptTermsVersion' in (error.details as Record<string, unknown>);
+      if (policyMoved) {
+        setAcceptTerms(false);
+        setPolicyReload((count) => count + 1);
+      }
       setErrors(fieldErrorsFrom(error));
-      setGeneralError(error instanceof Error ? error.message : 'Could not start the booking. Please retry.');
+      setGeneralError(
+        policyMoved ? '' : error instanceof Error ? error.message : 'Could not start the booking. Please retry.',
+      );
     } finally {
       setBusy(false);
     }
@@ -836,6 +854,8 @@ export default function BookingDrawer({
                       {errors.phone && <p className="field-error">{errors.phone}</p>}
                     </div>
                     {errors.qty && <p className="field-error">{errors.qty}</p>}
+
+                    <PolicySummary lang={lang} reloadKey={policyReload} onVersion={setPolicyVersion} />
 
                     <label
                       className={`flex cursor-pointer items-start gap-2.5 rounded-xl border px-3.5 py-3 transition-colors ${

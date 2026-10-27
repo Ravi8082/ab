@@ -23,6 +23,7 @@ import {
   adminAmendOptions,
   adminBookings,
   adminCancelBooking,
+  adminCancelSeats,
   adminCreateEntryBlock,
   adminDownloadBookings,
   adminEntryBlocks,
@@ -922,6 +923,8 @@ function AmendBookingDialog({
   const [roster, setRoster] = useState<RosterRow[]>([]);
   const [reason, setReason] = useState('');
   const [paymentReference, setPaymentReference] = useState('');
+  const [refundAmount, setRefundAmount] = useState('');
+  const [refundReference, setRefundReference] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
@@ -932,6 +935,8 @@ function AmendBookingDialog({
     setError('');
     setReason('');
     setPaymentReference('');
+    setRefundAmount('');
+    setRefundReference('');
     setQty(Number(booking.qty));
     setRoster(rosterForBooking(booking));
     setLoading(true);
@@ -945,21 +950,27 @@ function AmendBookingDialog({
       .finally(() => setLoading(false));
   }, [booking]);
 
-  if (!booking) return null;
-
   const selectedSchedule = options?.schedules.find((item) => String(item.scheduleId) === scheduleId) ?? null;
   const selectedTicket =
     selectedSchedule?.tickets.find((item) => String(item.ticketTypeId) === ticketTypeId) ?? null;
+  const discount = options ? Math.min(options.booking.discountAmount, (selectedTicket?.price ?? 0) * qty) : 0;
+  const newAmount = options && selectedTicket ? selectedTicket.price * qty - discount : 0;
+  const difference = options ? newAmount - options.booking.amount : 0;
+  const refundValue = Math.max(0, Math.floor(Number(refundAmount) || 0));
+
+  useEffect(() => {
+    // A cheaper pass releases money; default the refund to the full release so nothing is forgotten.
+    if (difference < 0) setRefundAmount(String(-difference));
+    else setRefundAmount('');
+  }, [difference]);
+
+  if (!booking) return null;
 
   const changeQty = (value: number) => {
     const next = Math.max(1, Math.min(20, Number.isFinite(value) ? Math.round(value) : 1));
     setQty(next);
     setRoster((rows) => resizeRoster(rows, next - 1));
   };
-
-  const discount = options ? Math.min(options.booking.discountAmount, (selectedTicket?.price ?? 0) * qty) : 0;
-  const newAmount = options && selectedTicket ? selectedTicket.price * qty - discount : 0;
-  const difference = options ? newAmount - options.booking.amount : 0;
 
   const submit = async () => {
     if (!options || !selectedSchedule || !selectedTicket) {
@@ -978,6 +989,10 @@ function AmendBookingDialog({
       setError(
         `The updated pass costs ₹${difference.toLocaleString('en-IN')} more. Collect the difference and enter its payment reference.`,
       );
+      return;
+    }
+    if (difference < 0 && refundValue > -difference) {
+      setError(`The refund cannot exceed ₹${(-difference).toLocaleString('en-IN')} released by this change.`);
       return;
     }
     for (let index = 0; index < roster.length; index += 1) {
@@ -1005,6 +1020,8 @@ function AmendBookingDialog({
         qty,
         reason: reason.trim(),
         paymentReference: paymentReference.trim() || undefined,
+        refundAmount: difference < 0 ? refundValue : undefined,
+        refundReference: difference < 0 ? refundReference.trim() || undefined : undefined,
         attendees: roster.map((person) => ({
           name: person.name.trim(),
           phone: person.phone.trim(),
@@ -1016,7 +1033,9 @@ function AmendBookingDialog({
         result.difference > 0
           ? `${booking.reference} updated. ${money(result.difference)} extra recorded and a new QR was reissued.`
           : result.difference < 0
-            ? `${booking.reference} updated. The new fare is ${money(result.difference)} lower — record a refund if one is due.`
+            ? result.refundRecorded > 0
+              ? `${booking.reference} updated. ${money(result.refundRecorded)} refund recorded against the lower fare and a new QR was reissued.`
+              : `${booking.reference} updated. The fare is ${money(result.difference)} lower; no refund recorded, so that amount stays with the organisation.`
             : `${booking.reference} updated and a new QR was reissued.`,
       );
     } catch (err) {
@@ -1123,7 +1142,7 @@ function AmendBookingDialog({
                     </span>
                   ) : difference < 0 ? (
                     <span className="text-emerald-700">
-                      {formatRupees(Math.abs(difference))} lower than the amount paid — record a refund if due.
+                      {formatRupees(Math.abs(difference))} lower than the amount paid — record the refund below.
                     </span>
                   ) : (
                     <span className="text-muted">No payment difference.</span>
@@ -1149,6 +1168,31 @@ function AmendBookingDialog({
                   placeholder="e.g. UPI 1234567890"
                 />
               </Field>
+            )}
+
+            {difference < 0 && (
+              <div className="grid gap-4 sm:grid-cols-2">
+                <Field
+                  label="Refund amount (₹)"
+                  hint={`This change releases ${formatRupees(-difference)}. Set 0 to keep it as a cancellation fee.`}
+                >
+                  <TextInput
+                    type="number"
+                    min={0}
+                    max={-difference}
+                    value={refundAmount}
+                    onChange={(event) => setRefundAmount(event.target.value)}
+                  />
+                </Field>
+                <Field label="Refund reference" hint="UPI / bank UTR / Razorpay refund ID">
+                  <TextInput
+                    value={refundReference}
+                    onChange={(event) => setRefundReference(event.target.value)}
+                    maxLength={120}
+                    placeholder="Optional"
+                  />
+                </Field>
+              </div>
             )}
 
             {qty > 1 && (
@@ -1217,6 +1261,9 @@ function CancelRefundDialog({
   onClose: () => void;
   onSaved: (message: string) => void;
 }) {
+  const [mode, setMode] = useState<'all' | 'seats'>('all');
+  const [seats, setSeats] = useState(1);
+  const [selected, setSelected] = useState<number[]>([]);
   const [reason, setReason] = useState('');
   const [refundAmount, setRefundAmount] = useState('0');
   const [refundReference, setRefundReference] = useState('');
@@ -1227,6 +1274,9 @@ function CancelRefundDialog({
 
   useEffect(() => {
     if (!booking) return;
+    setMode('all');
+    setSeats(1);
+    setSelected([]);
     setReason('');
     setRefundAmount(
       booking.status === 'paid' && Number(booking.amount) > 0 ? String(Number(booking.amount)) : '0',
@@ -1238,8 +1288,57 @@ function CancelRefundDialog({
   if (!booking) return null;
 
   const paidAmount = Number(booking.amount) || 0;
+  const totalSeats = Number(booking.qty) || 1;
   const canRefund = booking.status === 'paid' && paidAmount > 0;
+  const partialAvailable = booking.status === 'paid' && totalSeats > 1 && !booking.check_in_at;
+  const roster = [...(booking.attendees ?? [])]
+    .sort((a, b) => a.position - b.position)
+    .filter((person) => person.position > 1);
+  const usingRoster = roster.length > 0;
+  const cancelledQty = mode === 'seats' ? (usingRoster ? selected.length : seats) : totalSeats;
+
+  /** Fare held by the pass after `count` seats leave; the difference is what can go back. */
+  const releaseFor = (count: number) => {
+    if (count <= 0) return 0;
+    const left = totalSeats - count;
+    const gross = Number(booking.unit_price) * left;
+    const discount = Math.min(Number(booking.discount_amount || 0), gross);
+    return Math.max(0, paidAmount - (gross - discount));
+  };
+  const released = mode === 'seats' ? releaseFor(cancelledQty) : paidAmount;
   const refundValue = Math.max(0, Math.floor(Number(refundAmount) || 0));
+
+  const toggleSeat = (position: number) => {
+    const picked = selected.includes(position);
+    if (!picked && selected.length >= totalSeats - 1) {
+      setError('Keep at least one seat on the pass. Use “Whole booking” to cancel every seat.');
+      return;
+    }
+    setError('');
+    const next = picked
+      ? selected.filter((value) => value !== position)
+      : [...selected, position];
+    setSelected(next);
+    setRefundAmount(String(releaseFor(next.length)));
+  };
+
+  const changeSeats = (value: number) => {
+    const next = Math.max(1, Math.min(totalSeats - 1, Math.floor(value) || 1));
+    setSeats(next);
+    setRefundAmount(String(releaseFor(next)));
+  };
+
+  const startPartial = () => {
+    setMode('seats');
+    setError('');
+    setRefundAmount(String(releaseFor(usingRoster ? selected.length : seats)));
+  };
+
+  const startWhole = () => {
+    setMode('all');
+    setError('');
+    setRefundAmount(String(paidAmount));
+  };
 
   const submit = async () => {
     setError('');
@@ -1271,6 +1370,44 @@ function CancelRefundDialog({
       setError('Write a short cancellation reason.');
       return;
     }
+
+    if (mode === 'seats') {
+      if (cancelledQty < 1) {
+        setError('Tick the attendees who are leaving, or enter how many seats to cancel.');
+        return;
+      }
+      if (cancelledQty >= totalSeats) {
+        setError('That is every seat. Use “Whole booking” to cancel the pass.');
+        return;
+      }
+      if (refundValue > released) {
+        setError(`The refund cannot exceed ₹${released.toLocaleString('en-IN')} released by these seats.`);
+        return;
+      }
+      setSaving(true);
+      try {
+        const result = await adminCancelSeats(booking.id, {
+          qty: cancelledQty,
+          reason: reason.trim(),
+          refundAmount: refundValue,
+          refundReference: refundReference.trim() || undefined,
+          positions: usingRoster ? selected : undefined,
+        });
+        onSaved(
+          `${result.seatsCancelled} seat${result.seatsCancelled === 1 ? '' : 's'} cancelled on ${booking.reference}. ` +
+            `${result.seatsLeft} seat${result.seatsLeft === 1 ? '' : 's'} stay valid` +
+            (result.refundRecorded > 0
+              ? `, a ₹${result.refundRecorded.toLocaleString('en-IN')} refund is recorded, and the new QR was emailed.`
+              : ', and the new QR was emailed.'),
+        );
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Could not cancel these seats.');
+      } finally {
+        setSaving(false);
+      }
+      return;
+    }
+
     if (canRefund && refundValue > paidAmount) {
       setError(`The refund cannot exceed the paid amount of ₹${paidAmount.toLocaleString('en-IN')}.`);
       return;
@@ -1299,29 +1436,45 @@ function CancelRefundDialog({
     }
   };
 
+  const footerLabel = saving
+    ? 'Saving…'
+    : refundOnly
+      ? 'Record refund'
+      : mode === 'seats'
+        ? `Cancel ${cancelledQty} seat${cancelledQty === 1 ? '' : 's'}${refundValue > 0 ? ` & refund ₹${refundValue.toLocaleString('en-IN')}` : ''}`
+        : refundValue > 0
+          ? `Cancel & refund ₹${refundValue.toLocaleString('en-IN')}`
+          : 'Cancel booking';
+
   return (
     <Modal
       open
       onClose={saving ? () => undefined : onClose}
-      title={refundOnly ? `Record refund — ${booking.reference}` : `Cancel booking — ${booking.reference}`}
+      title={
+        refundOnly
+          ? `Record refund — ${booking.reference}`
+          : mode === 'seats'
+            ? `Cancel some seats — ${booking.reference}`
+            : `Cancel booking — ${booking.reference}`
+      }
       subtitle={
         refundOnly
           ? 'This booking is already cancelled. Record the money returned to the devotee.'
-          : 'Cancelling closes the pass and releases its seats. The QR stops working at the gate immediately.'
+          : mode === 'seats'
+            ? 'Only the seats you pick are cancelled. The rest of the pass stays valid and a fresh QR is emailed.'
+            : 'Cancelling closes the pass and releases its seats. The QR stops working at the gate immediately.'
       }
       footer={
         <div className="flex items-center justify-end gap-2">
           <Button tone="ghost" onClick={onClose} disabled={saving}>
             Close
           </Button>
-          <Button tone="danger" onClick={() => void submit()} disabled={saving}>
-            {saving
-              ? 'Saving…'
-              : refundOnly
-                ? 'Record refund'
-                : refundValue > 0
-                  ? `Cancel & refund ₹${refundValue.toLocaleString('en-IN')}`
-                  : 'Cancel booking'}
+          <Button
+            tone="danger"
+            onClick={() => void submit()}
+            disabled={saving || (!refundOnly && mode === 'seats' && cancelledQty < 1)}
+          >
+            {footerLabel}
           </Button>
         </div>
       }
@@ -1348,11 +1501,98 @@ function CancelRefundDialog({
           )}
         </div>
 
-        {!refundOnly && (
+        {partialAvailable && (
+          <div className="grid gap-2 sm:grid-cols-2">
+            <button
+              type="button"
+              onClick={startWhole}
+              className={`rounded-xl border px-4 py-3 text-left transition-colors ${
+                mode === 'all'
+                  ? 'border-saffron bg-saffron/5 text-ink'
+                  : 'border-line bg-white text-muted hover:border-saffron/40'
+              }`}
+            >
+              <span className="block font-ui text-[0.82rem] font-semibold">Whole booking</span>
+              <span className="block text-[0.68rem]">Every seat goes back on sale</span>
+            </button>
+            <button
+              type="button"
+              onClick={startPartial}
+              className={`rounded-xl border px-4 py-3 text-left transition-colors ${
+                mode === 'seats'
+                  ? 'border-saffron bg-saffron/5 text-ink'
+                  : 'border-line bg-white text-muted hover:border-saffron/40'
+              }`}
+            >
+              <span className="block font-ui text-[0.82rem] font-semibold">Some seats</span>
+              <span className="block text-[0.68rem]">Cancel {totalSeats - 1 <= 1 ? 'a seat' : 'part of the group'} and keep the rest</span>
+            </button>
+          </div>
+        )}
+
+        {mode === 'all' && !refundOnly && (
           <Notice tone="info">
             The devotee receives a cancellation email. If a refund is recorded, the email says it will reach
             them within 15 working days, as promised in the refund policy.
           </Notice>
+        )}
+
+        {mode === 'seats' && (
+          <div className="rounded-xl border border-line bg-white p-4">
+            <p className="mb-2 font-ui text-[0.64rem] uppercase tracking-[0.14em] text-muted">
+              Who is leaving? ({cancelledQty} of {totalSeats - 1} selectable)
+            </p>
+            {usingRoster ? (
+              <div className="space-y-2">
+                <div className="flex flex-wrap items-baseline justify-between gap-2 rounded-lg border border-line bg-sandal-2/40 px-3 py-2">
+                  <span className="font-ui text-[0.78rem] font-semibold text-ink">
+                    {booking.name}
+                    <span className="ml-1.5 rounded-full bg-white px-1.5 py-0.5 font-ui text-[0.54rem] uppercase tracking-[0.1em] text-muted">
+                      Primary · stays
+                    </span>
+                  </span>
+                  <span className="text-[0.68rem] text-muted">{booking.phone}</span>
+                </div>
+                {roster.map((person) => (
+                  <label
+                    key={person.position}
+                    className={`flex cursor-pointer flex-wrap items-baseline justify-between gap-2 rounded-lg border px-3 py-2 ${
+                      selected.includes(person.position)
+                        ? 'border-red-300 bg-red-50/60'
+                        : 'border-line bg-white hover:border-saffron/40'
+                    }`}
+                  >
+                    <span className="flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        checked={selected.includes(person.position)}
+                        onChange={() => toggleSeat(person.position)}
+                        className="h-4 w-4 accent-red-600"
+                      />
+                      <span className="font-ui text-[0.78rem] font-semibold text-ink">{person.name}</span>
+                    </span>
+                    <span className="text-[0.68rem] text-muted">{person.phone}</span>
+                  </label>
+                ))}
+              </div>
+            ) : (
+              <Field label="Seats to cancel" hint={`1 to ${totalSeats - 1}`}>
+                <TextInput
+                  type="number"
+                  min={1}
+                  max={totalSeats - 1}
+                  value={seats}
+                  onChange={(event) => changeSeats(Number(event.target.value))}
+                />
+              </Field>
+            )}
+            <p className="mt-2 text-[0.72rem] text-muted">
+              Fare released by these seats:{' '}
+              <span className="font-semibold text-ink">{formatRupees(released)}</span> · the pass keeps{' '}
+              {formatRupees(paidAmount - released)} for {totalSeats - cancelledQty} seat
+              {totalSeats - cancelledQty === 1 ? '' : 's'}.
+            </p>
+          </div>
         )}
 
         {!refundOnly && (
@@ -1361,7 +1601,11 @@ function CancelRefundDialog({
               value={reason}
               onChange={(event) => setReason(event.target.value)}
               maxLength={255}
-              placeholder="e.g. Devotee requested cancellation on phone"
+              placeholder={
+                mode === 'seats'
+                  ? 'e.g. Four devotees from this group cannot travel'
+                  : 'e.g. Devotee requested cancellation on phone'
+              }
             />
           </Field>
         )}
@@ -1373,13 +1617,15 @@ function CancelRefundDialog({
               hint={
                 refundOnly
                   ? `Paid amount ₹${paidAmount.toLocaleString('en-IN')}`
-                  : 'Set 0 to cancel without a refund; you can record it later from this row.'
+                  : mode === 'seats'
+                    ? `Up to ${formatRupees(released)} released by these seats. Set 0 to keep it as a cancellation fee.`
+                    : 'Set 0 to cancel without a refund; you can record it later from this row.'
               }
             >
               <TextInput
                 type="number"
                 min={refundOnly ? 1 : 0}
-                max={paidAmount}
+                max={refundOnly || mode === 'all' ? paidAmount : released}
                 value={refundAmount}
                 onChange={(event) => setRefundAmount(event.target.value)}
               />
@@ -1712,10 +1958,12 @@ export default function AdminBookings() {
       </Panel>
 
       {totals && (
-        <div className="mb-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
+        <div className="mb-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
           <Stat label="Bookings" value={totals.bookings.toLocaleString('en-IN')} tone="sky" />
           <Stat label="Seats" value={totals.seats.toLocaleString('en-IN')} />
-          <Stat label="Revenue" value={formatRupees(totals.revenue)} tone="lotus" />
+          <Stat label="Collected" value={formatRupees(totals.collected)} tone="sky" />
+          <Stat label="Refunds returned" value={formatRupees(totals.refunds)} tone="amber" />
+          <Stat label="Net revenue" value={formatRupees(totals.revenue)} tone="lotus" />
           <Stat label="Paid" value={totals.paid.toLocaleString('en-IN')} />
           <Stat label="Pending" value={totals.pending.toLocaleString('en-IN')} tone="amber" />
           <Stat label="Checked in" value={totals.checkedIn.toLocaleString('en-IN')} />
@@ -1741,7 +1989,9 @@ export default function AdminBookings() {
                     <th className="px-5 py-2.5">State</th>
                     <th className="px-3 py-2.5 text-right">Bookings</th>
                     <th className="px-3 py-2.5 text-right">Seats</th>
-                    <th className="px-3 py-2.5 text-right">Revenue</th>
+                    <th className="px-3 py-2.5 text-right">Collected</th>
+                    <th className="px-3 py-2.5 text-right">Refunds</th>
+                    <th className="px-3 py-2.5 text-right">Net revenue</th>
                     <th className="px-5 py-2.5 text-right">Checked in</th>
                   </tr>
                 </thead>
@@ -1754,7 +2004,11 @@ export default function AdminBookings() {
                       </td>
                       <td className="px-3 py-2.5 text-right text-muted">{state.bookings}</td>
                       <td className="px-3 py-2.5 text-right font-semibold text-ink">{state.seats}</td>
-                      <td className="px-3 py-2.5 text-right">{formatRupees(state.revenue)}</td>
+                      <td className="px-3 py-2.5 text-right">{formatRupees(state.collected)}</td>
+                      <td className="px-3 py-2.5 text-right text-red-700">
+                        {state.refunds > 0 ? formatRupees(state.refunds) : '—'}
+                      </td>
+                      <td className="px-3 py-2.5 text-right font-semibold text-ink">{formatRupees(state.revenue)}</td>
                       <td className="px-5 py-2.5 text-right text-muted">{state.checkedIn}</td>
                     </tr>
                   ))}
@@ -1797,6 +2051,11 @@ export default function AdminBookings() {
                   {bookings.map((booking) => {
                     const category = (booking.guest_category || 'visitor') as GuestCategory;
                     const roster = [...(booking.attendees ?? [])].sort((a, b) => a.position - b.position);
+                    const adjustments = [...(booking.adjustments ?? [])].sort((a, b) => b.id - a.id);
+                    const hasMoneyTrail =
+                      Number(booking.collected_amount) > 0 ||
+                      Number(booking.refunds_total) > 0 ||
+                      adjustments.length > 0;
                     const blocked = isBlocked(booking);
                     const closed = booking.status === 'cancelled' || booking.status === 'refunded';
                     const canCancel = !closed && !booking.check_in_at;
@@ -1808,7 +2067,10 @@ export default function AdminBookings() {
                       Number(booking.discount_amount) > 0 ||
                       Boolean(booking.coupon_code) ||
                       Boolean(booking.cancelled_at) ||
-                      booking.refund_amount != null;
+                      Boolean(booking.terms_accepted_at) ||
+                      booking.refund_amount != null ||
+                      Number(booking.refunds_total) > 0 ||
+                      (booking.adjustments?.length ?? 0) > 0;
                     const open = expanded.has(booking.id);
                     return (
                       <Fragment key={booking.id}>
@@ -1830,6 +2092,11 @@ export default function AdminBookings() {
                             </div>
                             {booking.otp_verified_at && (
                               <span className="mt-1 block text-[0.6rem] text-muted">OTP verified</span>
+                            )}
+                            {booking.terms_accepted_at && (
+                              <span className="mt-1 block text-[0.6rem] text-muted">
+                                {booking.source === 'online' ? 'Policy accepted' : 'Policy marked accepted'}
+                              </span>
                             )}
                           </td>
                           <td className="px-3 py-3">
@@ -1865,6 +2132,11 @@ export default function AdminBookings() {
                             {Number(booking.discount_amount) > 0 && (
                               <span className="block text-[0.6rem] font-ui font-normal text-emerald-700">
                                 {formatRupees(Number(booking.discount_amount))} off
+                              </span>
+                            )}
+                            {Number(booking.refunds_total) > 0 && (
+                              <span className="block text-[0.6rem] font-ui font-normal text-red-700">
+                                {formatRupees(Number(booking.refunds_total))} refunded
                               </span>
                             )}
                           </td>
@@ -2032,16 +2304,100 @@ export default function AdminBookings() {
                                         {booking.cancel_reason ? ` · ${booking.cancel_reason}` : ''}
                                       </p>
                                     )}
-                                    {booking.refund_amount != null && (
+                                    {hasMoneyTrail && (
+                                      <div className="mt-1.5 border-t border-line pt-1.5">
+                                        <span className="font-ui text-[0.6rem] uppercase tracking-[0.1em] text-muted">
+                                          Money trail
+                                        </span>
+                                        <p className="mt-1">
+                                          Collected from devotee:{' '}
+                                          <span className="font-semibold text-ink">
+                                            {formatRupees(Number(booking.collected_amount))}
+                                          </span>
+                                          {Number(booking.refunds_total) > 0 && (
+                                            <>
+                                              {' · '}refunded{' '}
+                                              <span className="font-semibold text-red-700">
+                                                {formatRupees(Number(booking.refunds_total))}
+                                              </span>
+                                            </>
+                                          )}
+                                        </p>
+                                        <p>
+                                          Retained by the organisation:{' '}
+                                          <span className="font-semibold text-ink">
+                                            {formatRupees(Number(booking.net_amount))}
+                                          </span>
+                                          {booking.status === 'cancelled' || booking.status === 'refunded'
+                                            ? ' (includes any cancellation fee kept)'
+                                            : ''}
+                                        </p>
+                                        {booking.refund_amount != null && (
+                                          <p>
+                                            Whole-booking refund {formatRupees(Number(booking.refund_amount))}
+                                            {booking.refund_reference ? ` · ${booking.refund_reference}` : ''}
+                                            {booking.refunded_at ? ` · ${formatDateTime(booking.refunded_at)}` : ''}
+                                            {booking.refunded_by_name ? ` · by ${booking.refunded_by_name}` : ''}
+                                          </p>
+                                        )}
+                                        {Number(booking.captured_amount) > 0 &&
+                                          Math.abs(
+                                            Number(booking.captured_amount) - Number(booking.collected_amount),
+                                          ) > 1 && (
+                                            <p className="text-amber-700">
+                                              Gateway payments show{' '}
+                                              {formatRupees(Number(booking.captured_amount))} captured, which
+                                              does not match the fare ledger above. Check this row manually.
+                                            </p>
+                                          )}
+                                        {adjustments.length > 0 && (
+                                          <ul className="mt-1.5 space-y-1.5">
+                                            {adjustments.map((adjustment) => (
+                                              <li
+                                                key={adjustment.id}
+                                                className="rounded-md border border-line bg-sandal-2/40 px-2 py-1.5"
+                                              >
+                                                <p className="font-ui text-[0.68rem] font-semibold text-ink">
+                                                  {adjustment.kind === 'seats_cancelled'
+                                                    ? `${adjustment.seats} seat${adjustment.seats === 1 ? '' : 's'} cancelled`
+                                                    : 'Fare reduced'}{' '}
+                                                  · {formatRupees(adjustment.amountBefore)} →{' '}
+                                                  {formatRupees(adjustment.amountAfter)}
+                                                </p>
+                                                <p>
+                                                  Refund {formatRupees(adjustment.refund)}
+                                                  {adjustment.reference ? ` · ${adjustment.reference}` : ''}
+                                                  {adjustment.by ? ` · by ${adjustment.by}` : ''} ·{' '}
+                                                  {formatDateTime(adjustment.created_at)}
+                                                </p>
+                                                {adjustment.removed && adjustment.removed.length > 0 && (
+                                                  <p>
+                                                    Removed:{' '}
+                                                    {adjustment.removed
+                                                      .map((person) => person.name)
+                                                      .join(', ')}
+                                                  </p>
+                                                )}
+                                                <p>{adjustment.reason}</p>
+                                              </li>
+                                            ))}
+                                          </ul>
+                                        )}
+                                      </div>
+                                    )}
+                                    {booking.terms_accepted_at && (
                                       <p className="mt-1.5 border-t border-line pt-1.5">
                                         <span className="font-ui text-[0.6rem] uppercase tracking-[0.1em] text-muted">
-                                          Refund
+                                          Policy acceptance
                                         </span>
                                         <br />
-                                        {formatRupees(Number(booking.refund_amount))}
-                                        {booking.refund_reference ? ` · ${booking.refund_reference}` : ''}
-                                        {booking.refunded_at ? ` · ${formatDateTime(booking.refunded_at)}` : ''}
-                                        {booking.refunded_by_name ? ` · by ${booking.refunded_by_name}` : ''}
+                                        {formatDateTime(booking.terms_accepted_at)}
+                                        {booking.terms_version
+                                          ? ` · wording ${booking.terms_version}`
+                                          : booking.source === 'online'
+                                            ? ' · wording not captured for this booking'
+                                            : ' · stamped when this pass was issued, not clicked by the devotee'}
+                                        {booking.terms_ip ? ` · from ${booking.terms_ip}` : ''}
                                       </p>
                                     )}
                                   </div>

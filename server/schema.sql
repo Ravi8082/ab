@@ -374,6 +374,8 @@ CREATE TABLE IF NOT EXISTS event_bookings (
   admin_note     VARCHAR(255) NULL,
   otp_verified_at DATETIME NULL,
   terms_accepted_at DATETIME NULL,
+  terms_version VARCHAR(64) NULL,
+  terms_ip VARCHAR(64) NULL,
   qr_token       CHAR(32) NULL UNIQUE,
   pass_sent_at   DATETIME NULL,
   check_in_at    DATETIME NULL,
@@ -526,6 +528,26 @@ CREATE TABLE IF NOT EXISTS event_payments (
   KEY idx_epay_booking (booking_id),
   KEY idx_epay_provider_ref (provider, provider_ref),
   CONSTRAINT fk_epay_booking FOREIGN KEY (booking_id) REFERENCES event_bookings(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Every change that moved money on a booking: cancelled seats, a cheaper ticket or fare, a
+-- part-refund. The dashboard adds these refunds up, so an amended booking never loses its trail.
+CREATE TABLE IF NOT EXISTS event_booking_adjustments (
+  id             BIGINT AUTO_INCREMENT PRIMARY KEY,
+  booking_id     BIGINT NOT NULL,
+  kind           ENUM('seats_cancelled','fare_reduced') NOT NULL,
+  seats_removed  INT NOT NULL DEFAULT 0,
+  amount_before  INT NOT NULL,
+  amount_after   INT NOT NULL,
+  refund_amount  INT NOT NULL DEFAULT 0,
+  refund_reference VARCHAR(120) NULL,
+  reason         VARCHAR(255) NOT NULL,
+  removed_attendees JSON NULL,
+  created_by     INT NULL,
+  created_at     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_adjust_booking (booking_id, created_at),
+  CONSTRAINT fk_adjust_booking FOREIGN KEY (booking_id) REFERENCES event_bookings(id) ON DELETE CASCADE,
+  CONSTRAINT fk_adjust_admin FOREIGN KEY (created_by) REFERENCES admins(id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- ------------------------------------------------------------------

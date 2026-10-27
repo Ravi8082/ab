@@ -12,6 +12,7 @@ import { sendOtpEmail } from '../lib/mailer.js';
 import {
   activateBooking,
   loadBookingByReference,
+  policyVersion,
   publicPass,
   soldBySchedule,
 } from '../lib/eventBookings.js';
@@ -120,6 +121,8 @@ const bookingSchema = z.object({
   phone: z.string().trim().regex(/^[6-9]\d{9}$/, 'Enter a valid 10-digit Indian mobile number'),
   qty: z.coerce.number().int().min(1).max(20),
   acceptTerms: z.boolean().refine((value) => value === true, 'Accept the terms, privacy and refund policy to continue.'),
+  // The wording the devotee actually read — checked against the wording being stored.
+  acceptTermsVersion: z.string().trim().min(1).max(64),
   couponCode: z
     .string()
     .trim()
@@ -318,7 +321,12 @@ publicRouter.get(
     if (rows.length === 0) throw new HttpError(404, 'That page is not written yet.');
 
     res.set('Cache-Control', 'public, max-age=300');
-    res.json({ page: req.params.page, content: rows[0].value_json, support: supportRows[0]?.value_json ?? null });
+    res.json({
+      page: req.params.page,
+      version: await policyVersion(),
+      content: rows[0].value_json,
+      support: supportRows[0]?.value_json ?? null,
+    });
   }),
 );
 
@@ -479,6 +487,19 @@ publicRouter.post(
 
     assertRoster(input);
 
+    // The schema above already refused a booking without acceptTerms === true, so consent exists at
+    // this point — record the policy wording in force and the caller address with it.
+    const acceptedVersion = await policyVersion();
+    const acceptedIp = clientIp(req);
+
+    // The devotee must have agreed to the text they were actually shown; an admin edit in between
+    // would otherwise be recorded as accepted without ever being read.
+    if (input.acceptTermsVersion !== acceptedVersion) {
+      throw new HttpError(409, 'The policy was updated. Please read it and accept again.', {
+        acceptTermsVersion: 'The policy text changed while you were booking.',
+      });
+    }
+
     async function insertBooking(reference) {
       return withTransaction(async (conn) => {
         const [capRows] = await conn.execute(
@@ -516,12 +537,13 @@ publicRouter.post(
         const [result] = await conn.execute(
           `INSERT INTO event_bookings
             (reference, event_id, schedule_id, ticket_type_id, name, email, phone, qty, pass_days, unit_price, amount,
-             gross_amount, discount_amount, coupon_code, source, guest_category, terms_accepted_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'online', 'visitor', NOW())`,
+             gross_amount, discount_amount, coupon_code, source, guest_category,
+             terms_accepted_at, terms_version, terms_ip)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'online', 'visitor', NOW(), ?, ?)`,
           [
             reference, schedule.event_id, schedule.id, ticket.id,
             input.name, input.email.toLowerCase(), input.phone, input.qty, passDays, unitPrice, amount,
-            gross, discount, coupon?.code ?? null,
+            gross, discount, coupon?.code ?? null, acceptedVersion, acceptedIp,
           ],
         );
         const bookingId = result.insertId;

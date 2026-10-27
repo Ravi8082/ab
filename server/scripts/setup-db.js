@@ -92,6 +92,9 @@ async function main() {
   }
 
   await ensureColumn('event_bookings', 'terms_accepted_at', 'DATETIME NULL AFTER otp_verified_at');
+  // Admins can rewrite the legal pages, so the timestamp alone cannot prove what was agreed to.
+  await ensureColumn('event_bookings', 'terms_version', 'VARCHAR(64) NULL AFTER terms_accepted_at');
+  await ensureColumn('event_bookings', 'terms_ip', 'VARCHAR(64) NULL AFTER terms_version');
 
   // Admin-issued free passes, coupons, guest category and per-person attendee details.
   await ensureColumn('event_bookings', 'source', "ENUM('online','admin_free','admin_issued') NOT NULL DEFAULT 'online' AFTER status");

@@ -50,6 +50,8 @@ export default function AdminDashboard({ onGoTo }: { onGoTo: (tab: string) => vo
   const pending = data?.totals.pending ?? 0;
   const checkins = data?.totals.checkins ?? 0;
   const revenue = data?.totals.revenue ?? 0;
+  const collected = data?.totals.collected ?? 0;
+  const refunds = data?.totals.refunds ?? 0;
 
   const actions = [
     { label: 'Page content', hint: 'Hero, FAQ, Expo copy', icon: <Ticket size={16} />, tab: 'content' },
@@ -83,8 +85,10 @@ export default function AdminDashboard({ onGoTo }: { onGoTo: (tab: string) => vo
         </Panel>
       ) : data ? (
         <div className="space-y-6">
-          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
-            <Stat label="Paid revenue" value={formatRupees(revenue)} note="Captured payments only" tone="lotus" />
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+            <Stat label="Net revenue" value={formatRupees(revenue)} note="Fare held minus refunds" tone="lotus" />
+            <Stat label="Collected" value={formatRupees(collected)} note="Money received from devotees" tone="sky" />
+            <Stat label="Refunds returned" value={formatRupees(refunds)} note="Including part-cancellations" tone="amber" />
             <Stat label="Seats confirmed" value={paidSeats.toLocaleString('en-IN')} note="Paid pass holders" tone="sky" />
             <Stat label="Bookings" value={data.totals.bookings.toLocaleString('en-IN')} note={`${pending} pending payment`} />
             <Stat label="Checked in" value={checkins.toLocaleString('en-IN')} note="Scanned at the gate" tone="amber" />
@@ -135,7 +139,8 @@ export default function AdminDashboard({ onGoTo }: { onGoTo: (tab: string) => vo
                         <th className="px-5 py-2.5">State</th>
                         <th className="px-3 py-2.5 text-right">Bookings</th>
                         <th className="px-3 py-2.5 text-right">Seats</th>
-                        <th className="px-5 py-2.5 text-right">Revenue</th>
+                        <th className="px-3 py-2.5 text-right">Refunds</th>
+                        <th className="px-5 py-2.5 text-right">Net revenue</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-line/70">
@@ -147,6 +152,9 @@ export default function AdminDashboard({ onGoTo }: { onGoTo: (tab: string) => vo
                           </td>
                           <td className="px-3 py-3 text-right text-muted">{state.bookings}</td>
                           <td className="px-3 py-3 text-right font-semibold text-ink">{state.seats}</td>
+                          <td className="px-3 py-3 text-right text-red-700">
+                            {state.refunds > 0 ? formatRupees(state.refunds) : '—'}
+                          </td>
                           <td className="px-5 py-3 text-right font-display text-lg text-ink">{formatRupees(state.revenue)}</td>
                         </tr>
                       ))}
